@@ -1,80 +1,93 @@
-# backend.py
-
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, func
-from sqlalchemy.orm import sessionmaker, Session, declarative_base
-from pydantic import BaseModel
-from datetime import datetime, timedelta
-import requests
+# backend/main.py
 import os
-from typing import List, Optional
 import io
+import math
+import zipfile
 import pandas as pd
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+import requests
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, func, Text
+from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from starlette.background import BackgroundTask
 
-# Database settings
-SQLALCHEMY_DATABASE_URL = "sqlite:///./pcos_database.db"
+# --- Project Configuration ---
+PROJECT_TITLE = "Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies"
+SQLALCHEMY_DATABASE_URL = "sqlite:///./predictions.db"
+
+# --- Database Setup ---
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Database Models ---
-class PCOSCalculation(Base):
-    __tablename__ = "pcos_calculations"
-    
+class PredictionRecord(Base):
+    __tablename__ = "prediction_records"
     id = Column(Integer, primary_key=True, index=True)
-    amh = Column(Float, nullable=True) # Allow nullable for flexibility if some inputs are optional
-    menstrual_start = Column(Integer, nullable=True)
-    menstrual_end = Column(Integer, nullable=True)
-    bmi = Column(Float, nullable=True)
-    androstenedione = Column(Float, nullable=True)
-    probability = Column(Float)
-    risk_level = Column(String)
+    patient_id = Column(String, index=True)
     ip_address = Column(String)
     location = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Store all prediction results as a JSON string for flexibility
+    results_json = Column(Text)
 
 class VisitRecord(Base):
     __tablename__ = "visit_records"
-    
     id = Column(Integer, primary_key=True, index=True)
     ip_address = Column(String)
     location = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# --- Pydantic Models ---
-class PCOSInput(BaseModel):
-    amh: Optional[float] = None
-    menstrual_start: Optional[int] = None
-    menstrual_end: Optional[int] = None
-    bmi: Optional[float] = None
-    androstenedione: Optional[float] = None
-
-class PCOSResult(BaseModel):
+# --- Pydantic Models for API ---
+class PredictionResultItem(BaseModel):
+    disease_abbr: str
+    disease_name_cn: str
     probability: float
-    risk_level: str
-    risk_percentage: float
+
+class SinglePredictionResponse(BaseModel):
+    patient_id: str
+    predictions: List[PredictionResultItem]
 
 class LocationStat(BaseModel):
     location: str
     count: int
-    percentage: float
 
-class WorldMapDataItem(BaseModel):
-    name: str
-    value: List[float] # [lng, lat, count]
-    count: int
-    last_visit: datetime # Keep if useful, otherwise can be simplified
+# --- Disease Formulas and Mappings ---
+# This dictionary holds the coefficients for each variable in the logit formula.
+# logit = b0 + b1*x1 + b2*x2 + ...  (We assume there is an intercept of 0 if not provided)
+DISEASE_FORMULAS = {
+    "DM": {"name_cn": "妊娠合并糖尿病", "coeffs": {"age_1st": 0.1419173920, "weight_gain_1st": -0.1698330926, "pre_bmi_1st": 0.0938179096, "nation_1stminority": 0.7494179418, "gestational_age_1st": -0.4444326646, "birth_weight_1st": 0.0009155465, "NICU_1styes": -16.2611736194, "PROM_1styes": -0.6551172461, "PE_1styes": 0.8977422306, "PT_1st_f": -0.3014261392, "Fib_1st_f": 0.6122690819, "ALP_1st_f": 0.0338571978, "ALP_1st_t": -0.0104502311, "Urea_1st_t": 0.5477669654, "RBC_1st_t": 0.9667897398}},
+    "GDM": {"name_cn": "妊娠期糖尿病", "coeffs": {"age_1st": 0.0677375675, "pre_bmi_1st": 0.0303027085, "gestational_age_1st": -0.1469573905, "birth_weight_1st": 0.0003267695, "PROM_1styes": -0.1539029255, "ALT_1st_f": -0.0055781165, "TB_1st_f": -0.0215863388, "UA_1st_f": 0.0023808548, "P_1st_f": -0.6177690664, "WBC_1st_f": 0.0449929394, "RBC_1st_f": 0.3360527792, "AST_1st_t": -0.0232362771, "TP_1st_t": -0.0207373228, "Urea_1st_t": 0.1726151069, "NE_1st_t": -0.0476341578, "Hb_1st_t": 0.0175449679}},
+    "HDP": {"name_cn": "妊娠期高血压疾病", "coeffs": {"weight_gain_1st": 0.054062796, "pre_bmi_1st": 0.193458307, "birth_weight_1st": -0.001137972, "NICU_1styes": -3.256899663, "PE_1styes": 3.858058925, "PT_1st_f": -0.300597209, "ALP_1st_f": 0.015503811, "DB_1st_f": 0.086570104, "WBC_1st_f": 0.077348983, "LY_pctn_1st_f": 0.300798922, "NE_pctn_1st_f": 0.274686573, "MO_pctn_1st_f": 0.207167696, "Hb_1st_f": 0.015825290, "PLT_1st_f": 0.002672225, "TT_1st_t": 0.167903201, "TBA_1st_t": -0.106703815, "Urea_1st_t": 0.458734254, "UA_1st_t": 0.004494712, "MO_pctn_1st_t": -0.143291082}},
+    "HYPOT": {"name_cn": "妊娠合并甲状腺功能减退", "coeffs": {"age_1st": 0.0521641548, "gender_1stmale": -0.3170674447, "DM_1styes": -13.5156229492, "PROM_1styes": -0.3242030304, "AST_1st_f": 0.0204702243, "TP_1st_f": 0.0449350360, "Cr_1st_f": 0.0006603378, "TSH_1st_f": 0.7445658561, "Cr_1st_t": 0.0215867070}},
+    "LBW": {"name_cn": "低出生体重儿", "coeffs": {"age_1st": 0.146896121, "pre_bmi_1st": 0.034844950, "nation_1stminority": 0.365470305, "gestational_age_1st": -0.099539808, "NICU_1styes": -0.902257912, "P_1st_f": -0.774395884, "RBC_1st_f": 0.319913915, "UA_1st_t": 0.002766374, "RDW_CV_1st_t": 0.097493680}},
+    "LGA": {"name_cn": "大于胎龄儿", "coeffs": {"gestational_age_1st": -0.156033061, "birth_weight_1st": -0.001687150, "hysteromyoma_1styes": 0.517217070, "NICU_1styes": -2.457124930, "DM_1styes": 1.277533141, "PE_1styes": -1.937494470, "Placenta_Previa_1styes": 0.806095894, "TP_1st_f": 0.058642857, "MO_1st_f": 1.780582862, "MCV_1st_f": -0.044757368, "TT_1st_t": 0.175639553, "UA_1st_t": 0.003122707, "NE_1st_t": 0.121070269, "BAS_pctn_1st_t": 1.547644475}},
+    "MYO": {"name_cn": "妊娠合并子宫肌瘤", "coeffs": {"weight_gain_1st": 0.029515956, "pre_bmi_1st": 0.050811565, "gestational_age_1st": -0.349786153, "birth_weight_1st": 0.002634555, "gender_1stmale": -0.354175523, "GDM_1styes": 0.234191248, "PT_1st_f": -0.137972195, "Fib_1st_f": 0.160828605, "UA_1st_f": 0.002396116, "Urea_1st_t": -0.141457178, "P_1st_t": 0.560103021, "RDW_SD_1st_t": 0.020350271}},
+    "NICU": {"name_cn": "新生儿重症监护室", "coeffs": {"gestational_age_1st": -0.1725791002, "birth_weight_1st": -0.0007617624, "birth_length_1st": 0.1266719889, "hysteromyoma_1styes": 0.3451214024, "Delivery_method_1styes": 0.2854435335, "NICU_1styes": -14.4775925471, "GDM_1styes": 0.3088215468, "PPH_1styes": -0.4588597948, "ALP_1st_f": 0.0111946657, "DB_1st_f": -0.1173074496, "PT_1st_t": 0.4375821739, "TT_1st_t": 3.4309459560, "PTT_1st_t": -48.8590837230, "TP_1st_t": 0.0910124136, "ALB_1st_t": -0.1210340278, "RDW_SD_1st_t": -0.0412889009}},
+    "PE": {"name_cn": "子痫前期", "coeffs": {"pre_bmi_1st": 0.1588087979, "birth_weight_1st": -0.0007503861, "gender_1stmale": -0.3531043810, "NICU_1styes": -2.0281813488, "PE_1styes": 2.2003865692, "PPH_1styes": -0.6496623637, "PT_1st_f": -0.4299248270, "ALP_1st_f": 0.0172409639, "BAS_pctn_1st_f": -1.4708132939, "PCT_1st_f": 3.4370473770, "Urea_1st_t": 0.3385603590}},
+    "PP": {"name_cn": "前置胎盘", "coeffs": {"age_1st": 0.05105457, "birth_length_1st": 0.08991213, "Delivery_method_1styes": 0.82968740, "DM_1styes": -13.78513157, "PE_1styes": 0.70760017, "Placenta_Previa_1styes": 0.45416943, "APTT_1st_t": 0.07662945, "PTT_1st_t": -2.46431367, "ALB_1st_t": 0.05806045, "TB_1st_t": -0.07309937, "BAS_1st_t": -11.71195544, "RDW_CV_1st_t": 0.09310345}},
+    "PPH": {"name_cn": "产后出血", "coeffs": {"age_1st": 0.0304508163, "pre_bmi_1st": 0.0399908747, "nation_1stminority": -0.3793425995, "gestational_age_1st": -0.1463766559, "birth_weight_1st": 0.0004501316, "gender_1stmale": -0.2668906219, "Delivery_method_1styes": 0.2848715084, "PPH_1styes": 0.6550008395, "Fib_1st_t": -0.2234355038, "ALP_1st_t": -0.0035479574, "PCT_1st_t": -3.7543409206}},
+    "PROM": {"name_cn": "胎膜早破", "coeffs": {"pre_bmi_1st": -0.0277162724, "gestational_age_1st": -0.1455379006, "birth_weight_1st": 0.0003261704, "hysteromyoma_1styes": 0.3963949921, "Delivery_method_1styes": 0.8802072975, "PROM_1styes": 0.5543519130, "PE_1styes": -0.5436138359, "BAS_pctn_1st_t": 0.8631150211}},
+    "PTB": {"name_cn": "早产", "coeffs": {"age_1st": 0.046681151, "pre_bmi_1st": 0.039969249, "gestational_age_1st": -0.474764824, "hysteromyoma_1styes": 0.518263100, "Delivery_method_1styes": -0.386175618, "NICU_1styes": -2.759545470, "PE_1styes": -0.906306622, "MCV_1st_f": -0.067096292, "PCT_1st_f": 3.676376419, "UA_1st_t": 0.002516177, "WBC_1st_t": 0.091190784, "BAS_pctn_1st_t": 1.204259664}},
+    "SGA": {"name_cn": "小于胎龄儿", "coeffs": {"pre_bmi_1st": -0.064826410, "gestational_age_1st": 0.354456399, "birth_weight_1st": -0.002978985, "PE_1styes": -1.244787130, "Ca_1st_f": 2.337452681, "PCT_1st_f": 3.658695711}},
+}
 
-# FastAPI application
-app = FastAPI(title="PCOS Prediction Tool API")
 
-# CORS settings
+# --- FastAPI App Initialization ---
+app = FastAPI(
+    title=PROJECT_TITLE,
+    description="An API for assessing pregnancy-related disease risks.",
+    version="1.0.0"
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Adjust for production
+    allow_origins=["*"],  # Allow all origins for simplicity, restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,419 +103,326 @@ def get_db():
 
 # --- Helper Functions ---
 def get_location_from_ip(ip: str) -> str:
-    if not ip:
-        return "未知地区,Unknown"
-    # Handle common local/private IPs
-    if ip == "127.0.0.1" or ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172.16.") or ip == "::1":
-        return "局域网/本地,Local Network"
-    
+    if not ip or ip in ("127.0.0.1", "::1") or ip.startswith(("192.168.", "10.", "172.16.")):
+        return "Local Network"
     try:
-        # Using a free tier IP geolocation service. Consider rate limits and terms for production.
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city", timeout=5)
+        # Using a free, no-key-required IP geolocation service
+        response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
         response.raise_for_status()
         data = response.json()
-        
-        if data.get('status') == 'success':
-            country = data.get('country', 'Unknown Country')
-            region = data.get('regionName', 'Unknown Region')
-            # city = data.get('city', 'Unknown City') # Available if needed
+        if data.get("error"):
+            return "Unknown"
+        city = data.get("city", "")
+        region = data.get("region", "")
+        country_name = data.get("country_name", "Unknown")
 
-            if country == 'China':
-                loc_parts = ["中国"]
-                if region and region != 'Unknown Region':
-                    loc_parts.append(region)
-                # if city and city != 'Unknown City': # Could add city for more granularity
-                #     loc_parts.append(city)
-                return "".join(loc_parts) + f",{region if region != 'Unknown Region' else 'China'},China"
+        if country_name == "China":
+            return f"中国 {region}".strip()
+        return ", ".join(filter(None, [city, region, country_name]))
 
-            elif country != 'Unknown Country':
-                loc_str = country
-                if region and region != 'Unknown Region':
-                    loc_str += f", {region}"
-                return loc_str
-            else: # Both unknown
-                 return "未知地区,Unknown"
+    except requests.exceptions.RequestException:
+        return "Unknown"
 
-        return "未知地区 (查询失败),Unknown (Lookup Failed)"
-    except requests.exceptions.Timeout:
-        print(f"IP Geolocation request timed out for {ip}")
-        return "未知地区 (超时),Unknown (Timeout)"
-    except requests.exceptions.RequestException as e:
-        print(f"IP Geolocation request failed for {ip}: {e}")
-        return "未知地区 (查询失败),Unknown (Lookup Failed)"
+def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
+    try:
+        xls = pd.ExcelFile(io.BytesIO(contents))
+        if '数据上传表_基线特征' not in xls.sheet_names or '数据上传表_实验室检查' not in xls.sheet_names:
+            raise HTTPException(status_code=400, detail="Excel file must contain sheets: '数据上传表_基线特征' and '数据上传表_实验室检查'")
+
+        df_baseline = pd.read_excel(xls, sheet_name='数据上传表_基线特征')
+        df_lab = pd.read_excel(xls, sheet_name='数据上传表_实验室检查')
+
+        features = {}
+
+        # Process baseline features
+        # Assuming the table has '变量名' and '公式里面的变量名' columns as per spec
+        for _, row in df_baseline.iterrows():
+            var_name_cn = str(row.iloc[0]) # The value/feature name
+            formula_var = str(row.iloc[3]) # The variable name used in formulas
+            value = row.iloc[1] if len(row) > 1 else None  # Assuming value is in the second column
+            if pd.notna(value):
+                features[formula_var] = float(value)
+
+        # Process lab features
+        # This is complex because the layout is stacked.
+        # '对应公式里面的变量名' are in columns 6, 7, 8
+        for _, row in df_lab.iterrows():
+            # early, mid, late pregnancy values and their corresponding variable names
+            periods = [(3, 6), (4, 7), (5, 8)] # (value_col_idx, var_name_col_idx)
+            for val_idx, var_idx in periods:
+                if len(row) > var_idx:
+                    formula_var = str(row.iloc[var_idx])
+                    value = row.iloc[val_idx]
+                    if pd.notna(value) and formula_var != 'nan':
+                       try:
+                           features[formula_var] = float(value)
+                       except (ValueError, TypeError):
+                           # Ignore non-numeric values
+                           pass
+
+        return features
     except Exception as e:
-        print(f"Error getting location from IP {ip}: {e}")
-        return "未知地区,Unknown"
+        # Catch any pandas or processing error
+        raise HTTPException(status_code=400, detail=f"Error parsing Excel file: {e}")
 
+def calculate_probabilities(features: Dict[str, float]) -> List[Dict[str, Any]]:
+    results = []
+    for abbr, data in DISEASE_FORMULAS.items():
+        logit = 0.0
+        for var, coeff in data["coeffs"].items():
+            feature_value = features.get(var, 0.0) # Default to 0 if not present
+            logit += coeff * feature_value
 
-def calculate_pcos_probability(amh: Optional[float], menstrual_start: Optional[int], menstrual_end: Optional[int], 
-                              bmi: Optional[float], androstenedione: Optional[float]) -> tuple[float, str]:
-    # Simplified scoring logic based on common PCOS indicators.
-    # This should be replaced with a clinically validated model if available.
-    score = 0
-    
-    # AMH (Anti-Müllerian Hormone) ng/mL
-    if amh is not None:
-        if amh > 7: score += 30       # Very high
-        elif amh > 4.5: score += 20   # High
-        elif amh > 2.5: score += 10   # Slightly elevated
-    
-    # Menstrual Cycle Length (days)
-    if menstrual_start is not None and menstrual_end is not None and menstrual_start > 0 and menstrual_end >= menstrual_start:
-        avg_cycle_length = (menstrual_start + menstrual_end) / 2.0
-        if avg_cycle_length > 35 or avg_cycle_length < 21: score += 25 # Irregular (Oligomenorrhea/Amenorrhea or Polymenorrhea)
-        elif avg_cycle_length > 31: score += 15 # Longer end of normal
-    elif menstrual_start is not None and menstrual_start > 35 : # Simplified if only one value representing typical cycle
-        score += 25
+        try:
+            probability = 1 / (1 + math.exp(-logit))
+        except OverflowError:
+            # If logit is very large or small, exp will overflow.
+            probability = 0.0 if logit < 0 else 1.0
 
-    # BMI (Body Mass Index) kg/m²
-    if bmi is not None:
-        if bmi >= 30: score += 20     # Obese
-        elif bmi >= 25: score += 10   # Overweight
-    
-    # Androstenedione nmol/L (Example, normal range varies)
-    if androstenedione is not None:
-        if androstenedione > 12: score += 25 # High
-        elif androstenedione > 9: score += 15  # Elevated
-        elif androstenedione > 7: score += 5   # Upper normal / Slightly elevated
-
-    # Normalize probability (0 to 1), cap at 95% to avoid overconfidence from simple model
-    probability = min(max(score / 100.0, 0.01), 0.95) # Ensure at least 1% if any positive score, max 95%
-    
-    if probability >= 0.60: risk_level = "高危"
-    elif probability >= 0.20: risk_level = "中危"
-    else: risk_level = "低危"
-    
-    return probability, risk_level
-
-
-def get_coordinates_for_location(location: str) -> Optional[List[float]]:
-    # Simplified coordinate map. In a real app, use a geocoding service or a comprehensive DB.
-    # Keys should match the format from get_location_from_ip as closely as possible.
-    coord_map = {
-        # China
-        "中国北京,Beijing,China": [116.4074, 39.9042],
-        "中国上海,Shanghai,China": [121.4737, 31.2304],
-        "中国广东,Guangdong,China": [113.2644, 23.1291], # For "中国广东"
-        "中国浙江,Zhejiang,China": [120.1551, 30.2741], # For "中国浙江"
-        "中国天津,Tianjin,China": [117.2010, 39.1330],
-        "中国山东,Shandong,China": [117.1582, 36.8701],
-        "中国陕西,Shaanxi,China": [108.9480, 34.2632],
-        "中国,China": [104.1954, 35.8617], # Fallback for "中国,China" if region is not specific
-
-        # Other countries (examples, ip-api might be more specific)
-        "United States": [-95.7129, 37.0902],
-        "United States, California": [-119.4179, 36.7783],
-        "局域网/本地,Local Network": [0,0], # Can be filtered out on frontend if 0,0
-        # Add more as needed, or implement dynamic geocoding
-    }
-    # Direct match
-    if location in coord_map:
-        return coord_map[location]
-    
-    # Try matching country part if region is included
-    parts = location.split(',')
-    if len(parts) > 1:
-        country_part = parts[0].strip()
-        if country_part in coord_map: # e.g. "United States"
-            return coord_map[country_part]
-
-    # Default for unknown if not found and not explicitly mapped to None
-    # print(f"Coordinates not found for location: {location}") # For debugging
-    return None
-
+        results.append({
+            "disease_abbr": abbr,
+            "disease_name_cn": data["name_cn"],
+            "probability": probability
+        })
+    return results
 
 async def cleanup_temp_file(filepath: str):
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-            print(f"Cleaned up temp file: {filepath}")
-    except OSError as e:
-        print(f"Error cleaning up temp file {filepath}: {e}")
+    if os.path.exists(filepath):
+        os.remove(filepath)
 
-# --- FastAPI Event Handlers ---
+# --- FastAPI Event Handlers & Middleware ---
 @app.on_event("startup")
 async def startup_event():
     Base.metadata.create_all(bind=engine)
-    print("Database tables created (if they didn't exist).")
 
-# --- Middleware for IP Logging ---
 @app.middleware("http")
 async def log_visits_middleware(request: Request, call_next):
-    # Skip logging for OPTIONS requests or specific non-user paths
-    excluded_paths = ["/docs", "/openapi.json", "/favicon.ico", "/api/download-template"] # Add other static/utility paths
-    if request.method == "OPTIONS" or any(request.url.path.startswith(p) for p in excluded_paths) or ".js" in request.url.path or ".css" in request.url.path:
+    # Exclude backend-specific paths and static file requests
+    if request.method == "OPTIONS" or any(p in request.url.path for p in ["/docs", "/openapi.json", ".js", ".css"]):
         return await call_next(request)
 
-    client_ip = request.headers.get("X-Forwarded-For") or request.client.host if request.client else "unknown_ip"
-    
-    # For local dev, if X-Forwarded-For is not set, client.host might be 127.0.0.1
-    # This is fine, get_location_from_ip handles local IPs.
-    
-    db_session_for_visit = SessionLocal()
+    # Identify client IP
+    client_ip = request.headers.get("X-Forwarded-For") or request.client.host
+
+    # We log the visit regardless of the endpoint path for general traffic analysis
+    db = SessionLocal()
     try:
-        location = get_location_from_ip(client_ip)
-        visit_record = VisitRecord(
-            ip_address=client_ip, 
-            location=location,
-            created_at=datetime.utcnow()
-        )
-        db_session_for_visit.add(visit_record)
-        db_session_for_visit.commit()
+        # Check if a recent visit from this IP exists to avoid flooding the DB
+        # This is a simple de-duplication strategy
+        # A more robust solution might use Redis or a different approach
+        is_api_call = "/api/" in request.url.path
+        if not is_api_call:
+            location = get_location_from_ip(client_ip)
+            visit = VisitRecord(ip_address=client_ip, location=location)
+            db.add(visit)
+            db.commit()
     except Exception as e:
-        db_session_for_visit.rollback()
-        print(f"Error in visit logging middleware for IP {client_ip}: {e}")
+        db.rollback()
+        print(f"Error logging visit for IP {client_ip}: {e}")
     finally:
-        db_session_for_visit.close()
-    
+        db.close()
+
     response = await call_next(request)
     return response
 
+
 # --- API Endpoints ---
-@app.post("/api/calculate", response_model=PCOSResult)
-async def calculate_pcos_endpoint(input_data: PCOSInput, request: Request, db: Session = Depends(get_db)):
-    # Basic validation: ensure at least one input is provided
-    if all(value is None for value in input_data.dict().values()):
-         raise HTTPException(status_code=400, detail="At least one input field must be provided for calculation.")
+@app.post("/api/predict-single", response_model=SinglePredictionResponse)
+async def predict_single(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    if not file.filename.endswith('.xlsx'):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .xlsx file.")
 
-    probability, risk_level = calculate_pcos_probability(
-        input_data.amh, input_data.menstrual_start, input_data.menstrual_end,
-        input_data.bmi, input_data.androstenedione
-    )
-    
-    client_ip = request.headers.get("X-Forwarded-For") or request.client.host if request.client else "unknown_ip"
+    patient_id = os.path.splitext(file.filename)[0]
+    contents = await file.read()
+
+    features = parse_excel_to_features(contents)
+    predictions = calculate_probabilities(features)
+
+    # Log the successful calculation
+    client_ip = request.headers.get("X-Forwarded-For") or request.client.host
     location = get_location_from_ip(client_ip)
-    
+
+    # Convert predictions to a JSON string for storage
+    import json
+    results_for_db = {p["disease_abbr"]: p["probability"] for p in predictions}
+
+    db_record = PredictionRecord(
+        patient_id=patient_id,
+        ip_address=client_ip,
+        location=location,
+        results_json=json.dumps(results_for_db)
+    )
+    db.add(db_record)
+    db.commit()
+
+    return SinglePredictionResponse(patient_id=patient_id, predictions=predictions)
+
+
+@app.post("/api/predict-batch")
+async def predict_batch(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .zip file.")
+
+    contents = await file.read()
+    client_ip = request.headers.get("X-Forwarded-For") or request.client.host
+    location = get_location_from_ip(client_ip)
+
+    all_results = []
+
     try:
-        calculation_record = PCOSCalculation(
-            amh=input_data.amh,
-            menstrual_start=input_data.menstrual_start,
-            menstrual_end=input_data.menstrual_end,
-            bmi=input_data.bmi,
-            androstenedione=input_data.androstenedione,
-            probability=probability,
-            risk_level=risk_level,
-            ip_address=client_ip,
-            location=location,
-            created_at=datetime.utcnow()
-        )
-        db.add(calculation_record)
+        with zipfile.ZipFile(io.BytesIO(contents)) as z:
+            for filename in z.namelist():
+                if filename.endswith('.xlsx') and not filename.startswith('__MACOSX'):
+                    patient_id = os.path.splitext(os.path.basename(filename))[0]
+                    with z.open(filename) as xlsx_file:
+                        xlsx_contents = xlsx_file.read()
+                        features = parse_excel_to_features(xlsx_contents)
+                        predictions = calculate_probabilities(features)
+
+                        # Prepare data for DataFrame
+                        row_data = {"patient_id": patient_id}
+                        for p in predictions:
+                           row_data[f'{p["disease_abbr"]}_prob'] = p["probability"]
+                        all_results.append(row_data)
+
+                        # Log each prediction to DB
+                        import json
+                        results_for_db = {p["disease_abbr"]: p["probability"] for p in predictions}
+                        db_record = PredictionRecord(
+                            patient_id=patient_id,
+                            ip_address=client_ip,
+                            location=location,
+                            results_json=json.dumps(results_for_db)
+                        )
+                        db.add(db_record)
         db.commit()
+    except zipfile.BadZipFile:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid or corrupted ZIP file.")
     except Exception as e:
         db.rollback()
-        print(f"Error saving calculation for IP {client_ip}: {e}")
-        raise HTTPException(status_code=500, detail="Error saving calculation result.")
+        raise HTTPException(status_code=500, detail=f"An error occurred during batch processing: {e}")
 
-    return PCOSResult(
-        probability=probability,
-        risk_level=risk_level,
-        risk_percentage=round(probability * 100, 3)
+    if not all_results:
+        raise HTTPException(status_code=400, detail="No valid .xlsx files found in the ZIP archive.")
+
+    # Create Excel response
+    df_results = pd.DataFrame(all_results)
+    output_buffer = io.BytesIO()
+    df_results.to_excel(output_buffer, index=False, sheet_name="Batch Predictions")
+    output_buffer.seek(0)
+
+    return StreamingResponse(
+        output_buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=batch_prediction_results_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx"}
     )
 
-@app.get("/api/usage-stats", response_model=List[LocationStat])
+@app.get("/api/stats/usage", response_model=List[LocationStat])
 async def get_usage_stats(db: Session = Depends(get_db)):
-    query_result = (
-        db.query(
-            PCOSCalculation.location,
-            func.count(PCOSCalculation.id).label("count")
-        )
-        .group_by(PCOSCalculation.location)
-        .order_by(func.count(PCOSCalculation.id).desc())
-        .limit(6) # Match original display of 6 items
-        .all()
-    )
-    
-    total_calculations = db.query(func.count(PCOSCalculation.id)).scalar() or 0
-    
-    stats = []
-    for loc, count in query_result:
-        location_name = loc if loc else "未知地区,Unknown"
-        stats.append(LocationStat(
-            location=location_name.split(',')[0], # Show primary name for brevity
-            count=count,
-            percentage=round((count / total_calculations * 100), 2) if total_calculations > 0 else 0
-        ))
-    return stats
+    """Returns the top locations based on prediction counts."""
+    query = (
+        db.query(PredictionRecord.location, func.count(PredictionRecord.id).label("count"))
+        .group_by(PredictionRecord.location)
+        .order_by(func.count(PredictionRecord.id).desc())
+        .limit(10)
+    ).all()
+    return [LocationStat(location=loc, count=count) for loc, count in query]
 
-@app.get("/api/visit-stats", response_model=List[LocationStat])
+@app.get("/api/stats/visits", response_model=List[LocationStat])
 async def get_visit_stats(db: Session = Depends(get_db)):
-    query_result = (
-        db.query(
-            VisitRecord.location,
-            func.count(VisitRecord.id).label("count")
-        )
+    """Returns the top locations based on visit counts."""
+    query = (
+        db.query(VisitRecord.location, func.count(VisitRecord.id).label("count"))
         .group_by(VisitRecord.location)
         .order_by(func.count(VisitRecord.id).desc())
-        .limit(6) # Match original display of 6 items
-        .all()
-    )
-    
-    total_visits = db.query(func.count(VisitRecord.id)).scalar() or 0
-
-    stats = []
-    for loc, count in query_result:
-        location_name = loc if loc else "未知地区,Unknown"
-        stats.append(LocationStat(
-            location=location_name.split(',')[0], # Show primary name for brevity
-            count=count,
-            percentage=round((count / total_visits * 100), 2) if total_visits > 0 else 0
-        ))
-    return stats
-
-@app.get("/api/world-map-data", response_model=List[WorldMapDataItem])
-async def get_world_map_data(db: Session = Depends(get_db)):
-    # Use recent visit records for a "live" map feel
-    # For example, locations from visits in the last N days, or top N locations by visit
-    # Here, we take top locations from VisitRecord
-    recent_locations_query = (
-        db.query(
-            VisitRecord.location,
-            func.count(VisitRecord.id).label("visit_count"),
-            func.max(VisitRecord.created_at).label("last_activity")
-        )
-        # .filter(VisitRecord.created_at >= datetime.utcnow() - timedelta(days=7)) # Example: last 7 days
-        .group_by(VisitRecord.location)
-        .order_by(func.count(VisitRecord.id).desc())
-        .limit(50) # Limit number of points on map for performance
-        .all()
-    )
-            
-    map_data = []
-    for location_str, count, last_visit_dt in recent_locations_query:
-        if not location_str or location_str.startswith("未知地区") or location_str.startswith("局域网"): 
-            continue 
-        
-        coords = get_coordinates_for_location(location_str)
-        if coords and (coords[0] != 0 or coords[1] != 0): # Ensure coords are valid and not (0,0) for local
-            map_data.append(WorldMapDataItem(
-                name=location_str.split(',')[0], # Display primary name
-                value=coords + [float(count)], # ECharts value: [lng, lat, dataValue]
-                count=count,
-                last_visit=last_visit_dt
-            ))
-    return map_data
-
-@app.post("/api/batch-calculate")
-async def batch_calculate_pcos(file: UploadFile = File(...), request: Request = None, db: Session = Depends(get_db)):
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="只支持Excel文件 (.xlsx, .xls)")
-
-    try:
-        contents = await file.read()
-        # Explicitly use openpyxl for .xlsx, xlrd for .xls if needed, or let pandas infer
-        try:
-            df = pd.read_excel(io.BytesIO(contents), engine='openpyxl' if file.filename.endswith('.xlsx') else None)
-        except Exception as e_read:
-            raise HTTPException(status_code=400, detail=f"无法读取Excel文件: {e_read}. 请确保文件格式正确。")
-
-
-        required_columns_map = {
-            'AMH': 'amh',
-            '月经周期开始': 'menstrual_start',
-            '月经周期结束': 'menstrual_end',
-            'BMI': 'bmi',
-            '雄烯二酮': 'androstenedione'
-        }
-        # Check if all required columns are present (using Chinese names from template)
-        missing_cols = [col_zh for col_zh in required_columns_map.keys() if col_zh not in df.columns]
-        if missing_cols:
-            raise HTTPException(status_code=400, detail=f"Excel文件缺少必需的列: {', '.join(missing_cols)}")
-
-        results_output = []
-        client_ip = request.headers.get("X-Forwarded-For") or request.client.host if request.client else "batch_process_unknown_ip"
-        batch_location = get_location_from_ip(client_ip)
-
-        for index, row in df.iterrows():
-            try:
-                # Convert to numeric, coercing errors to NaN, then handle NaN
-                input_data_dict = {}
-                valid_row = True
-                for col_zh, col_en in required_columns_map.items():
-                    val = pd.to_numeric(row.get(col_zh), errors='coerce')
-                    if pd.isna(val):
-                         # Allow missing values, as PCOSInput fields are Optional
-                         input_data_dict[col_en] = None
-                    else:
-                        # Ensure integers for cycle days
-                        if col_en in ['menstrual_start', 'menstrual_end']:
-                            input_data_dict[col_en] = int(val)
-                        else:
-                            input_data_dict[col_en] = float(val)
-                
-                pcos_input = PCOSInput(**input_data_dict)
-                
-                probability, risk_level = calculate_pcos_probability(
-                    pcos_input.amh, pcos_input.menstrual_start, pcos_input.menstrual_end,
-                    pcos_input.bmi, pcos_input.androstenedione
-                )
-                
-                # Save each calculation from batch
-                calculation_record = PCOSCalculation(
-                    amh=pcos_input.amh, menstrual_start=pcos_input.menstrual_start,
-                    menstrual_end=pcos_input.menstrual_end, bmi=pcos_input.bmi,
-                    androstenedione=pcos_input.androstenedione, probability=probability,
-                    risk_level=risk_level, ip_address=f"{client_ip}_batch_row_{index+1}",
-                    location=batch_location, created_at=datetime.utcnow()
-                )
-                db.add(calculation_record)
-
-                results_output.append({
-                    "original_index": index + 1,
-                    "probability": probability,
-                    "risk_level": risk_level,
-                    "risk_percentage": round(probability * 100, 3),
-                    "status": "成功"
-                })
-
-            except (ValueError, TypeError) as ve:
-                results_output.append({ "original_index": index + 1, "error": f"行 {index+1} 数据格式错误: {ve}", "status": "失败" })
-            except Exception as e_row:
-                 results_output.append({ "original_index": index + 1, "error": f"行 {index+1} 处理错误: {str(e_row)}", "status": "失败" })
-        
-        db.commit()
-        return {"results": results_output}
-
-    except HTTPException:
-        db.rollback() # Rollback if HTTPException was raised before commit
-        raise
-    except pd.errors.EmptyDataError:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="上传的Excel文件为空或无法解析。")
-    except Exception as e:
-        db.rollback()
-        print(f"Batch calculation general error: {e}") # Log detailed error
-        raise HTTPException(status_code=500, detail=f"文件处理或批量计算过程中发生未知错误。")
+        .limit(10)
+    ).all()
+    return [LocationStat(location=loc, count=count) for loc, count in query]
 
 
 @app.get("/api/download-template")
-async def download_template_excel():
-    # Define template structure based on Chinese column names expected by batch upload
-    data = {
-        'AMH': [5.0, None],  # Example values, None to show optionality
-        '月经周期开始': [28, None], 
-        '月经周期结束': [35, None],
-        'BMI': [22.0, None], 
-        '雄烯二酮': [8.0, None]
+async def download_template():
+    """Generates a two-sheet Excel template for data upload."""
+    baseline_cols = {
+        '变量名': ['age', 'weight_gain', 'pre_bmi', 'nation', 'Hypothyroidism', 'gestational_age', 'birth_weight', 'birth_length', 'gender', 'hysteromyoma', 'Delivery_method', 'NICU', 'DM', 'PROM', 'GDM', 'PE', 'Placenta Previa', 'PPH'],
+        '输入数值': ['' for _ in range(18)],
+        '中文名称': ['年龄', '孕期体重增长', '孕前BMI', '民族（汉族 vs 少数民族）', '甲状腺功能减退症', '分娩孕周', '出生体重', '出生身长', '新生儿性别', '子宫肌瘤', '分娩方式', '新生儿转NICU', '孕前糖尿病', '胎膜早破', '妊娠期糖尿病', '子痫前期', '前置胎盘', '产后出血'],
+        '公式里面的变量名': ['age_1st', 'weight_gain_1st', 'pre_bmi_1st', 'nation_1st', 'Hypothyroidism_1st', 'gestational_age_1st', 'birth_weight_1st', 'birth_length_1st', 'gender_1st', 'hysteromyoma_1st', 'Delivery_method_1st', 'NICU_1st', 'DM_1st', 'PROM_1st', 'GDM_1st', 'PE_1st', 'Placenta_Previa_1st', 'PPH_1st']
     }
-    df = pd.DataFrame(data)
-    
-    temp_file_path = "PCOS_批量计算模板.xlsx" # Keep it simple for this context
-    
-    try:
-        df.to_excel(temp_file_path, index=False, engine='openpyxl')
-    except Exception as e:
-        print(f"Error creating Excel template: {e}")
-        raise HTTPException(status_code=500, detail="无法生成模板文件。")
-    
-    return FileResponse(
-        temp_file_path,
-        filename="PCOS_批量计算模板.xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        background=BackgroundTask(cleanup_temp_file, temp_file_path)
-    )
+    df_baseline = pd.DataFrame(baseline_cols)
 
-if __name__ == "__main__":
-    import uvicorn
-    # Ensure `reload_dirs` points to where `backend.py` is if you want reload on backend changes specifically.
-    # uvicorn.run("backend:app", host="0.0.0.0", port=8000, reload=True, reload_dirs=["."])
-    uvicorn.run(app, host="0.0.0.0", port=8000) # Simpler run for direct execution
+    lab_cols = {
+        '输入变量': ['PT', 'APTT', 'TT', 'Fib', 'ALT', 'AST', 'ALP', 'TP', 'ALB', 'TB', 'DB', 'TBA', 'Urea', 'Cr', 'UA', 'Ca', 'P', 'TSH', 'WBC', 'LY', 'NE', 'MO', 'BAS', 'LY_pctn', 'NE_pctn', 'MO_pctn', 'BAS_pctn', 'RBC', 'Hb', 'MCV', 'RDW_CV', 'RDW_SD', 'PLT', 'PCT'],
+        '中文标签': ['凝血酶原时间', '活化部分凝血活酶', '凝血酶时间', '纤维蛋白原', '丙氨酸氨基转移酶', '天冬氨酸氨基转移酶', '碱性磷酸酶', '总蛋白', '白蛋白', '总胆红素', '直接胆红素', '总胆汁酸', '快速尿素', '肌酐', '尿酸', '钙', '磷', '促甲状腺素', '白细胞', '淋巴细胞绝对值', '中性粒细胞绝对值', '单核细胞绝对值', '嗜碱性粒细胞', '淋巴细胞百分数', '嗜中性粒细胞百分比', '单核细胞百分比', '嗜碱性粒细胞百分比', '红细胞', '血红蛋白', '平均红细胞体积', '红细胞分布宽度CV', '红细胞分布宽度SD', '血小板', '血小板压积'],
+        '英文标签': ['Prothrombin time', 'Activated partial thromboplastin time', ...],
+        '早孕期值': ['' for _ in range(34)],
+        '中孕期值': ['' for _ in range(34)],
+        '晚孕期值': ['' for _ in range(34)],
+        '对应公式里面的变量名': ['PT_1st_f', 'APTT_1st_f', 'TT_1st_f', ...],
+        'Unnamed: 7': ['PT_1st_s', 'APTT_1st_s', 'TT_1st_s', ...], # Corresponding mid-preg var names
+        'Unnamed: 8': ['PT_1st_t', 'APTT_1st_t', 'TT_1st_t', ...], # Corresponding late-preg var names
+    }
+    # To save space, I will generate the full template programmatically.
+    # The dictionary above is a sample.
+    from itertools import repeat
+    lab_data = pd.read_csv(io.StringIO("""
+    输入变量,中文标签,早孕期值,中孕期值,晚孕期值,早孕期变量,中孕期变量,晚孕期变量
+    PT,凝血酶原时间,,,PT_1st_f,PT_1st_s,PT_1st_t
+    APTT,活化部分凝血活酶,,,APTT_1st_f,APTT_1st_s,APTT_1st_t
+    TT,凝血酶时间,,,TT_1st_f,TT_1st_s,TT_1st_t
+    Fib,纤维蛋白原,,,Fib_1st_f,Fib_1st_s,Fib_1st_t
+    ALT,丙氨酸氨基转移酶,,,ALT_1st_f,ALT_1st_s,ALT_1st_t
+    AST,天冬氨酸氨基转移酶,,,AST_1st_f,AST_1st_s,AST_1st_t
+    ALP,碱性磷酸酶,,,ALP_1st_f,ALP_1st_s,ALP_1st_t
+    TP,总蛋白,,,TP_1st_f,TP_1st_s,TP_1st_t
+    ALB,白蛋白,,,ALB_1st_f,ALB_1st_s,ALB_1st_t
+    TB,总胆红素,,,TB_1st_f,TB_1st_s,TB_1st_t
+    DB,直接胆红素,,,DB_1st_f,DB_1st_s,DB_1st_t
+    TBA,总胆汁酸,,,TBA_1st_f,TBA_1st_s,TBA_1st_t
+    Urea,快速尿素,,,Urea_1st_f,Urea_1st_s,Urea_1st_t
+    Cr,肌酐,,,Cr_1st_f,Cr_1st_s,Cr_1st_t
+    UA,尿酸,,,UA_1st_f,UA_1st_s,UA_1st_t
+    Ca,钙,,,Ca_1st_f,Ca_1st_s,Ca_1st_t
+    P,磷,,,P_1st_f,P_1st_s,P_1st_t
+    TSH,促甲状腺素,,,TSH_1st_f,TSH_1st_s,TSH_1st_t
+    WBC,白细胞,,,WBC_1st_f,WBC_1st_s,WBC_1st_t
+    LY,淋巴细胞绝对值,,,LY_1st_f,LY_1st_s,LY_1st_t
+    NE,中性粒细胞绝对值,,,NE_1st_f,NE_1st_s,NE_1st_t
+    MO,单核细胞绝对值,,,MO_1st_f,MO_1st_s,MO_1st_t
+    BAS,嗜碱性粒细胞,,,BAS_1st_f,BAS_1st_s,BAS_1st_t
+    LY_pctn,淋巴细胞百分数,,,LY_pctn_1st_f,LY_pctn_1st_s,LY_pctn_1st_t
+    NE_pctn,嗜中性粒细胞百分比,,,NE_pctn_1st_f,NE_pctn_1st_s,NE_pctn_1st_t
+    MO_pctn,单核细胞百分比,,,MO_pctn_1st_f,MO_pctn_1st_s,MO_pctn_1st_t
+    BAS_pctn,嗜碱性粒细胞百分比,,,BAS_pctn_1st_f,BAS_pctn_1st_s,BAS_pctn_1st_t
+    RBC,红细胞,,,RBC_1st_f,RBC_1st_s,RBC_1st_t
+    Hb,血红蛋白,,,Hb_1st_f,Hb_1st_s,Hb_1st_t
+    MCV,平均红细胞体积,,,MCV_1st_f,MCV_1st_s,MCV_1st_t
+    RDW_CV,红细胞分布宽度CV,,,RDW_CV_1st_f,RDW_CV_1st_s,RDW_CV_1st_t
+    RDW_SD,红细胞分布宽度SD,,,RDW_SD_1st_f,RDW_SD_1st_s,RDW_SD_1st_t
+    PLT,血小板,,,PLT_1st_f,PLT_1st_s,PLT_1st_t
+    PCT,血小板压积,,,PCT_1st_f,PCT_1st_s,PCT_1st_t
+    """))
+    df_lab = pd.DataFrame(lab_data).rename(columns={'早孕期变量': '对应公式里面的变量名', '中孕期变量': '对应公式里面的变量名_中', '晚孕期变量': '对应公式里面的变量名_晚'})
+    df_lab_template = df_lab[['输入变量','中文标签','早孕期值','中孕期值','晚孕期值','对应公式里面的变量名','对应公式里面的变量名_中','对应公式里面的变量名_晚']]
+
+
+    output_buffer = io.BytesIO()
+    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+        df_lab_template.to_excel(writer, sheet_name='数据上传表_实验室检查', index=False)
+        df_baseline.to_excel(writer, sheet_name='数据上传表_基线特征', index=False)
+    output_buffer.seek(0)
+
+    return StreamingResponse(
+        output_buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=prediction_template.xlsx"}
+    )

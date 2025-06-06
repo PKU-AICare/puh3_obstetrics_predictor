@@ -1,0 +1,80 @@
+run.sh
+result_frontend_backend.txt
+
+# ===================================================================
+# Root .gitignore for the PUH3 Obstetrics Predictor Project
+# ===================================================================
+
+# IDE and Editor Configuration
+# -----------------------------------
+.idea/
+.vscode/
+# Keep shared settings, ignore user-specific ones
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+*.swp
+
+# Operating System Files
+# -----------------------------------
+.DS_Store
+Thumbs.db
+._*
+
+# Log files
+# -----------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment Variables
+# -----------------------------------
+# Ignore all .env files, but keep the example template.
+.env*
+!.env.example
+
+# Build and Dependency Directories
+# -----------------------------------
+/node_modules/
+/build/
+/dist/
+/.output/
+/.vite/
+
+# Python Cache, Build, and Virtual Environment Files
+# ----------------------------------------------------
+# Byte-code
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+ENV/
+
+# Caches from common tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Database files
+# -----------------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# Test and Coverage Reports
+# -----------------------------------
+htmlcov/
+.coverage
