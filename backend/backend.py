@@ -295,17 +295,22 @@ async def download_template():
     df_baseline = pd.DataFrame(baseline_data)
 
     # --- Lab Results Sheet ---
+    # FIX: Define the list of variables first to avoid UnboundLocalError
+    lab_variables = ['PT','APTT','TT','Fib','ALT','AST','GGT','LDH','ALP','TP','ALB','GLB','TB','DB','TBA','PA','Urea','Cr','UA','CysC','B2MG','CO2','Na','K','CL','Ca','P','Mg','CK','CKMB','GLU','HbA1c','TCHO','TG','HDLC','LDLC','ApoA1','ApoB','Lpa','TSH','T4','T3','FT4','FT3','TPOAb','TGAb','TMA','CRP','USCRP','WBC','LY','NE','MO','BAS','EOS','LY_pctn','NE_pctn','MO_pctn','BAS_pctn','EOS_pctn','RBC','Hb','Hct','MCV','MCH','MCHC','RDW_CV','RDW_SD','PLT','MPV','PCT','PDW','m_dbp','m_sbp','m_nowweight2']
+
     lab_data = {
-        '输入变量 (Variable)': ['PT','APTT','TT','Fib','ALT','AST','GGT','LDH','ALP','TP','ALB','GLB','TB','DB','TBA','PA','Urea','Cr','UA','CysC','B2MG','CO2','Na','K','CL','Ca','P','Mg','CK','CKMB','GLU','HbA1c','TCHO','TG','HDLC','LDLC','ApoA1','ApoB','Lpa','TSH','T4','T3','FT4','FT3','TPOAb','TGAb','TMA','CRP','USCRP','WBC','LY','NE','MO','BAS','EOS','LY_pctn','NE_pctn','MO_pctn','BAS_pctn','EOS_pctn','RBC','Hb','Hct','MCV','MCH','MCHC','RDW_CV','RDW_SD','PLT','MPV','PCT','PDW','m_dbp','m_sbp','m_nowweight2'],
+        '输入变量 (Variable)': lab_variables,
         '中文标签 (Chinese Label)': ['凝血酶原时间','活化部分凝血活酶','凝血酶时间','纤维蛋白原','丙氨酸氨基转移酶','天冬氨酸氨基转移酶','快速γ谷氨酰转肽酶','乳酸脱氢酶','碱性磷酸酶','总蛋白','白蛋白','球蛋白','总胆红素','直接胆红素','总胆汁酸','前白蛋白','快速尿素','肌酐','尿酸','胱抑素C','β2微球蛋白','快速总二氧化碳','钠','钾','氯','钙','磷','镁','肌酸激酶','肌酸激酶同工酶','葡萄糖','糖化血红蛋白A1c','总胆固醇','甘油三酯','高密度脂蛋白胆固醇','低密度脂蛋白胆固醇','载脂蛋白A1','载脂蛋白B','脂蛋白a','促甲状腺素','总甲状腺素','总三碘甲状腺原氨酸','游离甲状腺素','游离三碘甲状腺原氨酸','抗甲状腺过氧化物酶抗体','抗甲状腺球蛋白抗体','抗甲状腺微粒体抗体','快速C-反应蛋白','超敏C反应蛋白','白细胞','淋巴细胞绝对值','中性粒细胞绝对值','单核细胞绝对值','嗜碱性粒细胞','嗜酸性粒细胞','淋巴细胞百分数','嗜中性粒细胞百分比','单核细胞百分比','嗜碱性粒细胞百分比','嗜酸性粒细胞百分比','红细胞','血红蛋白','红细胞压积','平均红细胞体积','平均血红蛋白含量','平均血红蛋白浓度','红细胞分布宽度CV','红细胞分布宽度SD','血小板','平均血小板体积','血小板压积','血小板分布宽度','舒张压','收缩压','本次门诊的体重'],
         '英文标签 (English Label)': ['Prothrombin time','Activated partial thromboplastin time','Thrombin time','Fibrinogen','Alanine aminotransferase','Aspartate aminotransferase','Gamma-glutamyl transferase','Lactate dehydrogenase','Alkaline phosphatase','Total protein','Albumin','Globulin','Total bilirubin','Direct bilirubin','Total bile acid','Prealbumin','Urea','Creatinine','Uric acid','Cystatin C','β2-microglobulin','Total carbon dioxide','Sodium','Potassium','Chloride','Calcium','Phosphorus','Magnesium','Creatine kinase','Creatine kinase-MB','Glucose','Glycated hemoglobin A1c','Total cholesterol','Triglyceride','High-density lipoprotein cholesterol','Low-density lipoprotein cholesterol','Apolipoprotein A1','Apolipoprotein B','Lipoprotein(a)','Thyroid-stimulating hormone','Total thyroxine','Total triiodothyronine','Free thyroxine','Free triiodothyronine','Anti-thyroid peroxidase antibody','Anti-thyroglobulin antibody','Anti-thyroid microsomal antibody','C-reactive protein','High-sensitivity C-reactive protein','White blood cell','Lymphocyte absolute count','Neutrophil absolute count','Monocyte absolute count','Basophil','Eosinophil','Lymphocyte percentage','Neutrophil percentage','Monocyte percentage','Basophil percentage','Eosinophil percentage','Red blood cell','Hemoglobin','Hematocrit','Mean corpuscular volume','Mean corpuscular hemoglobin','Mean corpuscular hemoglobin concentration','Red cell distribution width-CV','Red cell distribution width-SD','Platelet','Mean platelet volume','Plateletcrit','Platelet distribution width','Diastolic blood pressure','Systolic blood pressure','Current body weight'],
-        '早孕期值 (Early P.)': ['' for _ in range(75)],
-        '中孕期值 (Mid P.)': ['' for _ in range(75)],
-        '晚孕期值 (Late P.)': ['' for _ in range(75)],
-        'var_f': [f'{v}_1st_f' for v in lab_data['输入变量 (Variable)']],
-        'var_s': [f'{v}_1st_s' for v in lab_data['输入变量 (Variable)']],
-        'var_t': [f'{v}_1st_t' for v in lab_data['输入变量 (Variable)']],
+        '早孕期值 (Early P.)': ['' for _ in range(len(lab_variables))],
+        '中孕期值 (Mid P.)': ['' for _ in range(len(lab_variables))],
+        '晚孕期值 (Late P.)': ['' for _ in range(len(lab_variables))],
     }
+    # FIX: Add the derived columns after the dictionary is created
+    lab_data['var_f'] = [f'{v}_1st_f' for v in lab_variables]
+    lab_data['var_s'] = [f'{v}_1st_s' for v in lab_variables]
+    lab_data['var_t'] = [f'{v}_1st_t' for v in lab_variables]
+
     df_lab = pd.DataFrame(lab_data)
 
     output_buffer = io.BytesIO()
