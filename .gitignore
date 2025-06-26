@@ -1,5 +1,7 @@
 run.sh
 result_frontend_backend.txt
+index.html
+prompt_*.md
 
 # ===================================================================
 # Root .gitignore for the PUH3 Obstetrics Predictor Project
