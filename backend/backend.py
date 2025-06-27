@@ -539,12 +539,20 @@ async def predict_batch(request: Request, file: UploadFile = File(...), db: Sess
 
         elif file_ext == '7z':
             with py7zr.SevenZipFile(archive_bytes) as archive:
-                for filename in archive.getnames():
-                    if filename.lower().endswith('.xlsx') and not filename.startswith('__MACOSX') and not filename.startswith('.'):
-                        patient_id = os.path.splitext(os.path.basename(filename))[0]
-                        extracted_data = archive.read([filename])
-                        if filename in extracted_data:
-                            contents = extracted_data[filename].getvalue()
+                # Get the list of files first
+                file_list = archive.getnames()
+                xlsx_files = [f for f in file_list if f.lower().endswith('.xlsx') and not f.startswith('__MACOSX') and not f.startswith('.')]
+
+                if xlsx_files:
+                    # Extract all xlsx files at once
+                    extracted_files = archive.read(xlsx_files)
+
+                    for filename in xlsx_files:
+                        if filename in extracted_files:
+                            patient_id = os.path.splitext(os.path.basename(filename))[0]
+                            # Get the file content from the extracted files dictionary
+                            file_buffer = extracted_files[filename]
+                            contents = file_buffer.getvalue() if hasattr(file_buffer, 'getvalue') else file_buffer.read()
                             features = parse_excel_to_features(contents)
                             predictions = process_and_log_prediction(db, ip_info, patient_id, features)
                             all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
@@ -553,6 +561,9 @@ async def predict_batch(request: Request, file: UploadFile = File(...), db: Sess
     except zipfile.BadZipFile:
         db.rollback()
         raise HTTPException(status_code=400, detail="Invalid or corrupted ZIP file.")
+    except rarfile.BadRarFile:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid or corrupted RAR file.")
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Batch processing error: {str(e)}")
