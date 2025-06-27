@@ -12,7 +12,7 @@ from fastapi import (Depends, FastAPI, File, HTTPException, Request,
                      UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import (Column, DateTime, Float, ForeignKey, Integer, String,
                         Text, create_engine, func)
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
@@ -28,6 +28,7 @@ Base = declarative_base()
 
 # --- Database Models ---
 class PredictionRecord(Base):
+    """Stores each prediction event."""
     __tablename__ = "prediction_records"
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(String, index=True)
@@ -35,9 +36,10 @@ class PredictionRecord(Base):
     location = Column(String)
     country = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
-    results_json = Column(Text)
+    results_json = Column(Text) # Store prediction probabilities as JSON
 
 class VisitRecord(Base):
+    """Stores each unique visit to the site."""
     __tablename__ = "visit_records"
     id = Column(Integer, primary_key=True, index=True)
     ip_address = Column(String, index=True)
@@ -47,7 +49,7 @@ class VisitRecord(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- Pydantic Models ---
+# --- Pydantic Models (Data Transfer Objects) ---
 class PredictionItem(BaseModel):
     disease_abbr: str
     disease_name_cn: str
@@ -70,6 +72,7 @@ class StatsResponse(BaseModel):
     usage_ranking_by_country: List[LocationStat]
 
 # --- Disease Formulas & Mappings (with English names) ---
+# NOTE: Intercepts are assumed to be 0 or embedded in coefficients as per the original structure.
 DISEASE_FORMULAS = {
     "DM": {"name_cn": "妊娠合并糖尿病", "name_en": "Diabetes Mellitus in Pregnancy", "coeffs": {"age_1st": 0.1419173920, "weight_gain_1st": -0.1698330926, "pre_bmi_1st": 0.0938179096, "nation_1stminority": 0.7494179418, "gestational_age_1st": -0.4444326646, "birth_weight_1st": 0.0009155465, "NICU_1styes": -16.2611736194, "PROM_1styes": -0.6551172461, "PE_1styes": 0.8977422306, "PT_1st_f": -0.3014261392, "Fib_1st_f": 0.6122690819, "ALP_1st_f": 0.0338571978, "ALP_1st_t": -0.0104502311, "Urea_1st_t": 0.5477669654, "RBC_1st_t": 0.9667897398}},
     "GDM": {"name_cn": "妊娠期糖尿病", "name_en": "Gestational Diabetes Mellitus", "coeffs": {"age_1st": 0.0677375675, "pre_bmi_1st": 0.0303027085, "gestational_age_1st": -0.1469573905, "birth_weight_1st": 0.0003267695, "PROM_1styes": -0.1539029255, "ALT_1st_f": -0.0055781165, "TB_1st_f": -0.0215863388, "UA_1st_f": 0.0023808548, "P_1st_f": -0.6177690664, "WBC_1st_f": 0.0449929394, "RBC_1st_f": 0.3360527792, "AST_1st_t": -0.0232362771, "TP_1st_t": -0.0207373228, "Urea_1st_t": 0.1726151069, "NE_1st_t": -0.0476341578, "Hb_1st_t": 0.0175449679}},
@@ -90,8 +93,8 @@ DISEASE_FORMULAS = {
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title=PROJECT_TITLE,
-    description="A modern API for assessing pregnancy-related disease risks using Vue 3 and FastAPI.",
-    version="2.0.0"
+    description="A modern API for assessing pregnancy-related disease risks.",
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -111,29 +114,35 @@ def get_db():
         db.close()
 
 def get_location_from_ip(ip: str) -> Dict[str, str]:
+    """Fetches geographic location from an IP address."""
     default_location = {"location": "Local Network", "country": "N/A"}
+    # Filter out private/local IP addresses
     if not ip or ip in ("127.0.0.1", "::1") or ip.startswith(("192.168.", "10.", "172.16.")):
         return default_location
     try:
+        # Using a free, no-key-required IP geolocation API
         response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
         response.raise_for_status()
         data = response.json()
+
         if data.get("error"):
             return {"location": "Unknown", "country": "Unknown"}
 
         country = data.get("country_name", "Unknown")
         region = data.get("region", "")
 
-        if country == "China":
+        # Specific formatting for China to include the province
+        if data.get("country_code") == "CN":
             location = f"中国 {region}".strip() if region else "中国"
         else:
             location = country
-
         return {"location": location, "country": country}
     except requests.exceptions.RequestException:
+        # Handle cases where the API is unreachable or times out
         return {"location": "Unknown", "country": "Unknown"}
 
 def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
+    """Parses the bilingual Excel template into a feature dictionary."""
     try:
         xls = pd.ExcelFile(io.BytesIO(contents))
         required_sheets = ['数据上传表_基线特征', '数据上传表_实验室检查']
@@ -142,29 +151,28 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
 
         df_baseline = pd.read_excel(xls, sheet_name=required_sheets[0], header=0)
         df_lab = pd.read_excel(xls, sheet_name=required_sheets[1], header=0)
+
         features = {}
 
-        # Process baseline features using the 'variable_name' column for mapping
+        # Process baseline features using the hidden 'variable_name' column for robust mapping
         for _, row in df_baseline.iterrows():
             var_name = row.get('variable_name')
             value = row.get('Value / 数值')
             if pd.notna(var_name) and pd.notna(value):
-                # Handle binary features described in comments e.g. "1 for Yes, 0 for No"
-                if "minority" in var_name: # nation_1stminority
-                    features[var_name] = 1.0 if float(value) == 2 else 0.0
-                elif "yes" in var_name: # e.g. NICU_1styes
-                    features[var_name] = 1.0 if float(value) == 1 else 0.0
-                elif "male" in var_name: # gender_1stmale
-                    features[var_name] = 1.0 if float(value) == 1 else 0.0
-                else: # Handle numeric values
+                # Handle specific mappings as described in template notes
+                if "nation_1stminority" in var_name:
+                    features[var_name] = 1.0 if float(value) == 2 else 0.0 # 2 is minority
+                elif "_1styes" in var_name or "male" in var_name: # Covers all 'yes' and 'male' flags
+                    features[var_name] = 1.0 if float(value) == 1 else 0.0 # 1 is yes/male
+                else: # Handle standard numeric values
                     features[var_name] = float(value)
 
-        # Process lab features
+        # Process lab features, mapping early/mid/late pregnancy values
         for _, row in df_lab.iterrows():
             # Early pregnancy (f)
             if 'variable_name_f' in df_lab.columns and pd.notna(row['variable_name_f']) and pd.notna(row['Early P. / 早孕期']):
                 features[row['variable_name_f']] = float(row['Early P. / 早孕期'])
-            # Mid pregnancy (s)
+            # Mid pregnancy (s) - not currently used in formulas, but parsed for completeness
             if 'variable_name_s' in df_lab.columns and pd.notna(row['variable_name_s']) and pd.notna(row['Mid P. / 中孕期']):
                 features[row['variable_name_s']] = float(row['Mid P. / 中孕期'])
             # Late pregnancy (t)
@@ -172,20 +180,25 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
                 features[row['variable_name_t']] = float(row['Late P. / 晚孕期'])
         return features
     except Exception as e:
+        # Catch-all for parsing errors (e.g., non-numeric data in value columns)
         raise HTTPException(status_code=422, detail=f"Error parsing Excel file: {e}")
 
 def calculate_probabilities(features: Dict[str, float]) -> List[Dict[str, Any]]:
+    """Calculates disease probabilities based on features and formulas."""
     results = []
     for abbr, data in DISEASE_FORMULAS.items():
         logit = 0.0
-        # The constant/intercept is missing from the provided dicts, assuming it's 0 or embedded.
-        # If there is a separate intercept, it should be added here.
+        # Sum the product of coefficients and their corresponding feature values
+        # .get(var, 0.0) ensures that if a feature is missing from the input, it's treated as 0
         for var, coeff in data["coeffs"].items():
             logit += coeff * features.get(var, 0.0)
+
+        # Calculate probability using the logistic function
         try:
             probability = 1 / (1 + math.exp(-logit))
-        except OverflowError:
+        except OverflowError: # Handle extremely large or small logit values
             probability = 0.0 if logit < 0 else 1.0
+
         results.append({
             "disease_abbr": abbr,
             "disease_name_cn": data["name_cn"],
@@ -195,8 +208,12 @@ def calculate_probabilities(features: Dict[str, float]) -> List[Dict[str, Any]]:
     return results
 
 def process_and_log_prediction(db: Session, ip_info: dict, patient_id: str, features: dict):
+    """Calculates predictions and logs the event to the database."""
     predictions = calculate_probabilities(features)
+
+    # Prepare a simplified dictionary for JSON storage in the database
     results_for_db = {p["disease_abbr"]: p["probability"] for p in predictions}
+
     db_record = PredictionRecord(
         patient_id=patient_id,
         ip_address=ip_info.get("ip_address"),
@@ -208,18 +225,19 @@ def process_and_log_prediction(db: Session, ip_info: dict, patient_id: str, feat
     return predictions
 
 # --- Middleware for Visit Logging ---
+# A simple middleware to log initial site visits.
+# For a Single Page Application (SPA), this typically logs the first load of index.html.
 @app.middleware("http")
 async def log_visits_middleware(request: Request, call_next):
-    # Avoid logging for API calls, docs, or static assets
-    if "/api/" in request.url.path or "/docs" in request.url.path or "/openapi.json" in request.url.path:
-        return await call_next(request)
-
-    # Simple check to log only the root path access, assuming it's the main app load
-    if request.url.path == '/':
+    # Log visit if the root path is accessed. We assume this is the main app entry point.
+    # We also check that it's not an API call to avoid double logging or logging internal calls.
+    if request.method == "GET" and request.url.path == "/" and not request.url.path.startswith("/api/"):
         db: Session = next(get_db())
         try:
+            # Get the real client IP, considering proxies
             client_ip = request.headers.get("x-forwarded-for") or request.client.host
             ip_info = get_location_from_ip(client_ip)
+
             visit = VisitRecord(
                 ip_address=client_ip,
                 location=ip_info.get("location"),
@@ -227,9 +245,9 @@ async def log_visits_middleware(request: Request, call_next):
             )
             db.add(visit)
             db.commit()
-        except Exception as e:
+        except Exception:
+            # If logging fails, roll back the transaction but don't crash the app
             db.rollback()
-            print(f"Error logging visit: {e}") # Non-critical, just log to console
         finally:
             db.close()
 
@@ -237,9 +255,11 @@ async def log_visits_middleware(request: Request, call_next):
     return response
 
 # --- API Endpoints ---
+
 @app.post("/api/predict-single", response_model=PatientPredictionResult)
 async def predict_single(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not file.filename.endswith('.xlsx'):
+    """Endpoint for single patient prediction via .xlsx file upload."""
+    if not file.filename.lower().endswith('.xlsx'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .xlsx file.")
 
     client_ip = request.headers.get("x-forwarded-for") or request.client.host
@@ -255,11 +275,14 @@ async def predict_single(request: Request, file: UploadFile = File(...), db: Ses
     db.commit()
     return PatientPredictionResult(patient_id=patient_id, predictions=predictions)
 
-
 @app.post("/api/predict-batch", response_model=List[PatientPredictionResult])
 async def predict_batch(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Endpoint for batch prediction via .zip file upload."""
     if not file.filename.lower().endswith('.zip'):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .zip file.")
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .zip archive.")
+
+    # Note: For .rar or .7z support, you would need to install `rarfile` or `py7zr`
+    # and add conditional logic based on the file extension. `zipfile` is in the standard library.
 
     client_ip = request.headers.get("x-forwarded-for") or request.client.host
     ip_info = get_location_from_ip(client_ip)
@@ -270,16 +293,18 @@ async def predict_batch(request: Request, file: UploadFile = File(...), db: Sess
     try:
         with zipfile.ZipFile(io.BytesIO(await file.read())) as z:
             for filename in z.namelist():
+                # Process only .xlsx files and ignore macOS resource fork folders
                 if filename.lower().endswith('.xlsx') and not filename.startswith('__MACOSX'):
                     patient_id = os.path.splitext(os.path.basename(filename))[0]
                     with z.open(filename) as xlsx_file:
                         try:
-                            features = parse_excel_to_features(xlsx_file.read())
+                            contents = xlsx_file.read()
+                            features = parse_excel_to_features(contents)
                             predictions = process_and_log_prediction(db, ip_info, patient_id, features)
                             all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
                         except Exception as e:
-                            # Log and skip corrupted/invalid files in batch
-                            print(f"Skipping file {filename} due to error: {e}")
+                            # Log and skip corrupted/invalid files within the batch
+                            print(f"Skipping file {filename} in batch due to error: {e}")
                             continue
         db.commit()
     except zipfile.BadZipFile:
@@ -290,20 +315,21 @@ async def predict_batch(request: Request, file: UploadFile = File(...), db: Sess
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during batch processing: {e}")
 
     if not all_results:
-        raise HTTPException(status_code=400, detail="No valid .xlsx files were found and processed in the ZIP archive.")
+        raise HTTPException(status_code=400, detail="No valid .xlsx files were processed in the ZIP archive.")
 
     return all_results
 
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_combined_stats(db: Session = Depends(get_db)):
-    total_visits = db.query(func.count(VisitRecord.id)).scalar()
-    total_predictions = db.query(func.count(PredictionRecord.id)).scalar()
-    unique_countries_count = db.query(func.count(func.distinct(PredictionRecord.country))).filter(PredictionRecord.country.isnot(None)).scalar()
+    """Endpoint to retrieve usage and visit statistics."""
+    total_visits = db.query(func.count(VisitRecord.id)).scalar() or 0
+    total_predictions = db.query(func.count(PredictionRecord.id)).scalar() or 0
+    unique_countries_count = db.query(func.count(func.distinct(PredictionRecord.country))).filter(PredictionRecord.country.isnot(None), PredictionRecord.country != "N/A").scalar() or 0
 
     # Top 10 countries by usage (predictions)
     usage_ranking_query = (
         db.query(PredictionRecord.country, func.count(PredictionRecord.id).label("count"))
-        .filter(PredictionRecord.country.isnot(None), PredictionRecord.country != "Unknown", PredictionRecord.country != "N/A")
+        .filter(PredictionRecord.country.isnot(None), PredictionRecord.country.notin_(["Unknown", "N/A", "Local Network"]))
         .group_by(PredictionRecord.country)
         .order_by(func.count(PredictionRecord.id).desc())
         .limit(10)
@@ -314,7 +340,7 @@ async def get_combined_stats(db: Session = Depends(get_db)):
     # Top 10 countries by visits
     visit_ranking_query = (
         db.query(VisitRecord.country, func.count(VisitRecord.id).label("count"))
-        .filter(VisitRecord.country.isnot(None), VisitRecord.country != "Unknown", VisitRecord.country != "N/A")
+        .filter(VisitRecord.country.isnot(None), VisitRecord.country.notin_(["Unknown", "N/A", "Local Network"]))
         .group_by(VisitRecord.country)
         .order_by(func.count(VisitRecord.id).desc())
         .limit(10)
@@ -332,6 +358,7 @@ async def get_combined_stats(db: Session = Depends(get_db)):
 
 @app.get("/api/download-template")
 async def download_template():
+    """Generates and serves the bilingual Excel template."""
     # --- Baseline Features Sheet ---
     baseline_data = {
         'Feature Name (CN / EN)': [
@@ -385,15 +412,17 @@ async def download_template():
         df_lab.to_excel(writer, sheet_name='数据上传表_实验室检查', index=False)
 
         # Hide the variable name columns for a cleaner user experience
-        for sheet_name in ['数据上传表_基线特征', '数据上传表_实验室检查']:
-            worksheet = writer.sheets[sheet_name]
-            for col_letter in ['D', 'E', 'F', 'G']: # Corresponds to variable_name columns
-                worksheet.column_dimensions[col_letter].hidden = True
+        ws_baseline = writer.sheets['数据上传表_基线特征']
+        ws_baseline.column_dimensions['D'].hidden = True
+
+        ws_lab = writer.sheets['数据上传表_实验室检查']
+        for col_letter in ['E', 'F', 'G']: # Corresponds to variable_name columns
+            ws_lab.column_dimensions[col_letter].hidden = True
 
     output_buffer.seek(0)
 
     return StreamingResponse(
         output_buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=prediction_template_v2.xlsx"}
+        headers={"Content-Disposition": "attachment; filename=prediction_template_bilingual.xlsx"}
     )

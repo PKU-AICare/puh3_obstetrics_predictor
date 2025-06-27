@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, nextTick } from 'vue';
 import axios from 'axios';
 import * as XLSX from 'xlsx';
-import { ElMessage, ElLoading, ElMessageBox } from 'element-plus';
+import { ElMessage, ElLoading } from 'element-plus';
 import { use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import { PieChart } from 'echarts/charts';
@@ -19,7 +19,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 const locales = {
   zh: {
     title: '再次妊娠孕期疾病发生风险评估',
-    subtitle: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
+    subtitle: '基于首次妊娠数据',
     singlePatient: '单个患者预测',
     singlePatientDesc: '上传单个患者的 Excel 文件 (.xlsx) 进行风险评估。文件名将作为患者ID。',
     batchPatient: '批量预测',
@@ -41,13 +41,8 @@ const locales = {
     noData: '暂无数据',
     downloadResults: '下载结果 (Excel)',
     patientSelection: '选择患者',
-    allPatients: '所有患者',
     langSwitch: 'EN',
-    disease: '疾病',
-    probability: '预测概率',
-    error: '错误',
-    success: '成功',
-    uploadSuccess: '文件上传成功',
+    uploadSuccess: '文件上传成功。',
     predictionSuccess: '患者 {patientId} 的风险评估完成！',
     batchSuccess: '批量预测完成！您现在可以从下拉菜单中选择患者查看结果。',
     downloadingTemplate: '正在生成模板...',
@@ -59,10 +54,10 @@ const locales = {
     exportError: '导出失败: {detail}',
   },
   en: {
-    title: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
-    subtitle: 'Based on data from the first pregnancy',
+    title: 'Pregnancy-Related Disease Risk Assessment',
+    subtitle: 'Based on First Pregnancy Data',
     singlePatient: 'Single Patient Prediction',
-    singlePatientDesc: 'Upload a single patient\'s Excel file (.xlsx) for risk assessment. The filename will be used as the Patient ID.',
+    singlePatientDesc: 'Upload a single patient\'s Excel file (.xlsx) for risk assessment. The filename will be used as Patient ID.',
     batchPatient: 'Batch Prediction',
     batchPatientDesc: 'Upload a ZIP archive (.zip) containing multiple patient Excel files for batch prediction.',
     downloadTemplate: 'Download Template',
@@ -82,13 +77,8 @@ const locales = {
     noData: 'No Data Available',
     downloadResults: 'Download Results (Excel)',
     patientSelection: 'Select Patient',
-    allPatients: 'All Patients',
     langSwitch: '中文',
-    disease: 'Disease',
-    probability: 'Probability',
-    error: 'Error',
-    success: 'Success',
-    uploadSuccess: 'File uploaded successfully',
+    uploadSuccess: 'File uploaded successfully.',
     predictionSuccess: 'Risk assessment for patient {patientId} is complete!',
     batchSuccess: 'Batch prediction complete! You can now select a patient from the dropdown to view results.',
     downloadingTemplate: 'Generating template...',
@@ -166,19 +156,24 @@ const downloadTemplate = async () => {
   }
 };
 
-const handleFileChange = (uploadFile, type) => {
+const handleFileChange = (uploadFile, type, uploadRef) => {
   const file = uploadFile.raw;
+  const isXLSX = file.name.toLowerCase().endsWith('.xlsx');
+  const isZIP = file.name.toLowerCase().endsWith('.zip');
+
   if (type === 'single') {
-    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+    if (!isXLSX) {
       ElMessage.error('Please upload a .xlsx file!');
-      singleUploadRef.value?.clearFiles();
+      uploadRef.clearFiles();
+      singleFile.value = null;
       return;
     }
     singleFile.value = file;
   } else {
-    if (!file.name.toLowerCase().endsWith('.zip')) {
-      ElMessage.error('Please upload a .zip file!');
-      batchUploadRef.value?.clearFiles();
+    if (!isZIP) {
+      ElMessage.error('Please upload a .zip archive!');
+      uploadRef.clearFiles();
+      batchFile.value = null;
       return;
     }
     batchFile.value = file;
@@ -200,7 +195,7 @@ const submitSinglePrediction = async () => {
     if (existingIndex > -1) {
       allPatientResults.value[existingIndex] = result;
     } else {
-      allPatientResults.value.push(result);
+      allPatientResults.value.unshift(result); // Add to the beginning
     }
     selectedPatientId.value = result.patient_id;
     ElMessage.success(t.value.predictionSuccess.replace('{patientId}', result.patient_id));
@@ -227,16 +222,17 @@ const submitBatchPrediction = async () => {
 
   try {
     const { data: results } = await axios.post(`${API_BASE_URL}/api/predict-batch`, formData);
-    results.forEach(result => {
+    // Reverse results to add newest first
+    results.reverse().forEach(result => {
       const existingIndex = allPatientResults.value.findIndex(p => p.patient_id === result.patient_id);
-      if (existingIndex > -1) {
-        allPatientResults.value[existingIndex] = result;
-      } else {
-        allPatientResults.value.push(result);
+      if (existingIndex > -1) { // Remove old and add to top
+        allPatientResults.value.splice(existingIndex, 1);
       }
+      allPatientResults.value.unshift(result);
     });
+
     if (results.length > 0) {
-      selectedPatientId.value = results[0].patient_id;
+      selectedPatientId.value = results[0].patient_id; // Select the first one from the batch
     }
     ElMessage.success(t.value.batchSuccess);
     fetchStats();
@@ -252,9 +248,10 @@ const submitBatchPrediction = async () => {
 };
 
 const exportResultsToExcel = () => {
+  if (!hasResults.value) return;
   try {
     const dataToExport = allPatientResults.value.map(patient => {
-      const row = { 'Patient ID': patient.patient_id };
+      const row = { [t.value.patientID]: patient.patient_id };
       patient.predictions.forEach(pred => {
         const key = `${pred.disease_abbr} (${lang.value === 'zh' ? pred.disease_name_cn : pred.disease_name_en})`;
         row[key] = (pred.probability * 100).toFixed(2) + '%';
@@ -282,11 +279,7 @@ const getChartOption = (diseaseName, probability) => {
       text: diseaseName,
       left: 'center',
       bottom: '5%',
-      textStyle: {
-        fontSize: 14,
-        fontWeight: 'normal',
-        color: '#606266',
-      },
+      textStyle: { fontSize: 14, fontWeight: 'normal', color: '#606266', overflow: 'truncate', width: 180 },
     },
     series: [
       {
@@ -295,23 +288,14 @@ const getChartOption = (diseaseName, probability) => {
         avoidLabelOverlap: false,
         silent: true,
         label: {
-          show: true,
-          position: 'center',
+          show: true, position: 'center',
           formatter: `{c}%`,
-          fontSize: 20,
-          fontWeight: 'bold',
-          color: color
+          fontSize: 20, fontWeight: 'bold', color: color,
         },
         data: [
           { value: probPercent, name: 'Probability', itemStyle: { color: color } },
           { value: 100 - probPercent, name: 'Remainder', itemStyle: { color: '#f0f2f5' } }
         ],
-        emphasis: {
-            label: {
-                show: true,
-                fontSize: 22
-            }
-        },
       }
     ]
   };
@@ -341,12 +325,10 @@ onMounted(fetchStats);
         <div class="control-panel">
           <el-card class="box-card" shadow="hover">
             <template #header>
-              <div class="card-header">
-                <el-icon><User /></el-icon><span>{{ t.singlePatient }}</span>
-              </div>
+              <div class="card-header"><el-icon><User /></el-icon><span>{{ t.singlePatient }}</span></div>
             </template>
             <p class="card-description">{{ t.singlePatientDesc }}</p>
-            <el-upload ref="singleUploadRef" drag action="#" :limit="1" :auto-upload="false" @change="(file) => handleFileChange(file, 'single')" accept=".xlsx">
+            <el-upload ref="singleUploadRef" drag action="#" :limit="1" :auto-upload="false" @change="(file) => handleFileChange(file, 'single', singleUploadRef)" accept=".xlsx">
               <el-icon class="el-icon--upload"><upload-filled /></el-icon>
               <div class="el-upload__text">{{ t.uploadDrag }}<em>{{ t.uploadClick }}</em></div>
             </el-upload>
@@ -358,12 +340,10 @@ onMounted(fetchStats);
 
           <el-card class="box-card" shadow="hover">
             <template #header>
-              <div class="card-header">
-                <el-icon><Files /></el-icon><span>{{ t.batchPatient }}</span>
-              </div>
+              <div class="card-header"><el-icon><Files /></el-icon><span>{{ t.batchPatient }}</span></div>
             </template>
             <p class="card-description">{{ t.batchPatientDesc }}</p>
-             <el-upload ref="batchUploadRef" drag action="#" :limit="1" :auto-upload="false" @change="(file) => handleFileChange(file, 'batch')" accept=".zip">
+            <el-upload ref="batchUploadRef" drag action="#" :limit="1" :auto-upload="false" @change="(file) => handleFileChange(file, 'batch', batchUploadRef)" accept=".zip">
               <el-icon class="el-icon--upload"><upload-filled /></el-icon>
               <div class="el-upload__text">{{ t.uploadDrag }}<em>{{ t.uploadClick }}</em></div>
             </el-upload>
@@ -378,25 +358,21 @@ onMounted(fetchStats);
           <el-card class="box-card results-card" shadow="hover">
             <template #header>
               <div class="card-header-flex">
-                <div class="card-header">
-                  <el-icon><DataAnalysis /></el-icon><span>{{ t.predictionResults }}</span>
-                </div>
+                <div class="card-header"><el-icon><DataAnalysis /></el-icon><span>{{ t.predictionResults }}</span></div>
                 <div v-if="hasResults" class="header-controls">
-                    <el-select v-model="selectedPatientId" :placeholder="t.patientSelection" size="small" style="width: 180px; margin-right: 10px;">
-                      <el-option v-for="patient in allPatientResults" :key="patient.patient_id" :label="patient.patient_id" :value="patient.patient_id" />
-                    </el-select>
-                    <el-button @click="exportResultsToExcel" type="primary" size="small" :icon="Document">{{ t.downloadResults }}</el-button>
+                  <el-select-v2 v-model="selectedPatientId" :options="allPatientResults.map(p => ({ value: p.patient_id, label: p.patient_id }))" :placeholder="t.patientSelection" size="small" style="width: 180px; margin-right: 10px;" />
+                  <el-button @click="exportResultsToExcel" type="primary" size="small" :icon="Document">{{ t.downloadResults }}</el-button>
                 </div>
               </div>
             </template>
-
-            <div v-if="currentPatientData" class="charts-grid" :key="`${selectedPatientId}-${chartGridKey}`">
-              <div v-for="pred in currentPatientData.predictions" :key="pred.disease_abbr" class="chart-container">
-                <v-chart class="chart" :option="getChartOption(lang === 'zh' ? pred.disease_name_cn : pred.disease_name_en, pred.probability)" autoresize />
+            <div v-if="currentPatientData" class="charts-grid-wrapper">
+              <div class="charts-grid" :key="`${selectedPatientId}-${chartGridKey}`">
+                <div v-for="pred in currentPatientData.predictions" :key="pred.disease_abbr" class="chart-container">
+                  <v-chart class="chart" :option="getChartOption(lang === 'zh' ? pred.disease_name_cn : pred.disease_name_en, pred.probability)" autoresize />
+                </div>
               </div>
             </div>
-
-            <el-empty v-else :description="t.noResults" />
+            <el-empty v-else :description="t.noResults" class="full-height-empty" />
           </el-card>
         </div>
       </div>
@@ -407,27 +383,16 @@ onMounted(fetchStats);
             <div class="card-header"><el-icon><TrendCharts /></el-icon><span>{{ t.stats }}</span></div>
          </template>
          <div class="stats-overview">
-            <div class="stat-item">
-                <div class="stat-value">{{ stats.total_visits }}</div>
-                <div class="stat-label">{{ t.totalVisits }}</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{{ stats.total_predictions }}</div>
-                <div class="stat-label">{{ t.totalPredictions }}</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{{ stats.unique_countries_count }}</div>
-                <div class="stat-label">{{ t.uniqueCountries }}</div>
-            </div>
+            <div class="stat-item"><div class="stat-value">{{ stats.total_visits }}</div><div class="stat-label">{{ t.totalVisits }}</div></div>
+            <div class="stat-item"><div class="stat-value">{{ stats.total_predictions }}</div><div class="stat-label">{{ t.totalPredictions }}</div></div>
+            <div class="stat-item"><div class="stat-value">{{ stats.unique_countries_count }}</div><div class="stat-label">{{ t.uniqueCountries }}</div></div>
          </div>
          <div class="stats-rankings">
             <div class="ranking-list">
                 <h3>{{ t.usageRanking }}</h3>
                 <ul v-if="stats.usage_ranking_by_country.length > 0">
                     <li v-for="(stat, index) in stats.usage_ranking_by_country" :key="stat.location">
-                        <span class="rank-badge">{{ index + 1 }}</span>
-                        <span class="location">{{ stat.location }}</span>
-                        <span class="count">{{ stat.count }}</span>
+                        <span class="rank-badge">{{ index + 1 }}</span><span class="location">{{ stat.location }}</span><span class="count">{{ stat.count }}</span>
                     </li>
                 </ul>
                 <el-empty v-else :description="t.noData" :image-size="50" />
@@ -436,9 +401,7 @@ onMounted(fetchStats);
                 <h3>{{ t.visitRanking }}</h3>
                 <ul v-if="stats.visit_ranking_by_country.length > 0">
                     <li v-for="(stat, index) in stats.visit_ranking_by_country" :key="stat.location">
-                        <span class="rank-badge">{{ index + 1 }}</span>
-                        <span class="location">{{ stat.location }}</span>
-                        <span class="count">{{ stat.count }}</span>
+                        <span class="rank-badge">{{ index + 1 }}</span><span class="location">{{ stat.location }}</span><span class="count">{{ stat.count }}</span>
                     </li>
                 </ul>
                 <el-empty v-else :description="t.noData" :image-size="50" />
@@ -458,27 +421,19 @@ onMounted(fetchStats);
 <style>
 /* --- Global Styles & Variables --- */
 :root {
-  --color-primary: #409eff;
-  --color-primary-light: #ecf5ff;
-  --color-success: #67c23a;
-  --color-warning: #e6a23c;
-  --color-danger: #f56c6c;
-  --color-text-primary: #303133;
-  --color-text-regular: #606266;
-  --color-text-secondary: #909399;
-  --border-color: #dcdfe6;
-  --bg-color-page: #f5f7fa;
-  --bg-color-card: #ffffff;
+  --color-primary: #409eff; --color-primary-light: #ecf5ff;
+  --color-success: #67c23a; --color-warning: #e6a23c; --color-danger: #f56c6c;
+  --color-text-primary: #303133; --color-text-regular: #606266; --color-text-secondary: #909399;
+  --border-color: #dcdfe6; --bg-color-page: #f5f7fa; --bg-color-card: #ffffff;
   --font-family-main: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
-  --card-border-radius: 12px;
-  --card-shadow: 0 8px 16px rgba(0,0,0,0.08);
+  --card-border-radius: 12px; --card-shadow: 0 8px 16px rgba(0,0,0,0.08);
 }
 body { margin: 0; font-family: var(--font-family-main); background-color: var(--bg-color-page); color: var(--color-text-primary); -webkit-font-smoothing: antialiased; }
 .container { width: 95%; max-width: 1800px; margin: 0 auto; }
 
 /* --- App Layout --- */
 .app-container { display: flex; flex-direction: column; min-height: 100vh; }
-.app-header { background: var(--bg-color-card); padding: 1.5rem 0; border-bottom: 1px solid var(--border-color); }
+.app-header { background: var(--bg-color-card); padding: 1.5rem 0; border-bottom: 1px solid #e4e7ed; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
 .header-content { display: flex; justify-content: space-between; align-items: center; width: 95%; max-width: 1800px; margin: 0 auto;}
 .logo-area { display: flex; align-items: center; gap: 1rem; }
 .title-main { font-size: 1.75rem; font-weight: 600; margin: 0; color: var(--color-text-primary); }
@@ -500,36 +455,20 @@ body { margin: 0; font-family: var(--font-family-main); background-color: var(--
 
 /* --- Panels --- */
 .control-panel { display: flex; flex-direction: column; gap: 2rem; }
-.results-panel { min-height: 600px; }
-.results-card { display: flex; flex-direction: column; height: 100%;}
-.results-card .el-card__body { flex-grow: 1; }
-
+.results-card { display: flex; flex-direction: column; min-height: 600px; height: 100%;}
+.results-card .el-card__body { flex-grow: 1; padding: 10px; display: flex; flex-direction: column;}
+.full-height-empty { flex-grow: 1; }
 .card-header-flex { display: flex; justify-content: space-between; align-items: center; }
-.header-controls { display: flex; align-items: center; }
 
 /* --- Charts Grid --- */
+.charts-grid-wrapper { overflow-y: auto; flex-grow: 1; }
 .charts-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 1rem;
-  padding: 1rem;
-  height: 100%;
-  overflow-y: auto;
+  gap: 1rem; padding: 10px;
 }
-.chart-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background-color: #fafafa;
-  border-radius: 8px;
-  padding: 10px;
-  height: 220px;
-}
-.chart {
-  width: 100%;
-  height: 100%;
-}
+.chart-container { display: flex; flex-direction: column; background-color: #fafafa; border-radius: 8px; padding: 10px; height: 220px; }
+.chart { width: 100%; height: 100%; }
 
 /* --- Stats Section --- */
 .stats-card { margin-top: 2rem; }
@@ -541,21 +480,13 @@ body { margin: 0; font-family: var(--font-family-main); background-color: var(--
 .ranking-list ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 1rem; }
 .ranking-list li { display: flex; align-items: center; font-size: 0.95rem; color: var(--color-text-regular); }
 .rank-badge {
-    background-color: var(--color-primary-light);
-    color: var(--color-primary);
-    font-weight: bold;
-    border-radius: 50%;
-    width: 24px;
-    height: 24px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    margin-right: 1rem;
+    background-color: var(--color-primary-light); color: var(--color-primary); font-weight: bold;
+    border-radius: 50%; width: 24px; height: 24px; display: inline-flex;
+    align-items: center; justify-content: center; margin-right: 1rem; flex-shrink: 0;
 }
 .ranking-list li:nth-child(1) .rank-badge { background-color: #f56c6c; color: white; }
 .ranking-list li:nth-child(2) .rank-badge { background-color: #e6a23c; color: white; }
 .ranking-list li:nth-child(3) .rank-badge { background-color: #67c23a; color: white; }
-
 .ranking-list .location { flex-grow: 1; font-weight: 500; }
 .ranking-list .count { font-weight: bold; color: var(--color-text-primary); }
 
@@ -565,10 +496,12 @@ body { margin: 0; font-family: var(--font-family-main); background-color: var(--
   .results-panel { order: -1; }
 }
 @media (max-width: 768px) {
-  .header-content { flex-direction: column; gap: 1rem; }
+  .header-content { flex-direction: column; gap: 1rem; align-items: flex-start; }
   .title-main { font-size: 1.5rem; }
   .stats-overview, .stats-rankings { grid-template-columns: 1fr; flex-direction: column; gap: 2rem;}
   .charts-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .chart-container { height: 180px; }
+  .main-grid { grid-template-columns: 1fr; }
+  .card-header-flex { flex-direction: column; align-items: flex-start; gap: 10px;}
 }
 </style>
