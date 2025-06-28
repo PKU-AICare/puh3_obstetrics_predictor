@@ -2,12 +2,12 @@ import io
 import json
 import math
 import os
+import tempfile
 import zipfile
-import rarfile
-import py7zr
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import libarchive
 import pandas as pd
 import requests
 from fastapi import (Depends, FastAPI, File, HTTPException, Request,
@@ -354,32 +354,100 @@ def get_db():
         db.close()
 
 def get_ip_info(request: Request) -> Dict[str, str]:
-    """Extracts client IP and fetches geographic location."""
-    ip = request.headers.get("x-forwarded-for") or request.client.host
-    default_location = {"ip": ip, "location": "Local Network", "country": "N/A"}
+    """Extracts client IP and fetches geographic location using improved geolocation."""
+    # Get real IP address, considering proxies and load balancers
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        ip = forwarded_for.split(",")[0].strip()
+    else:
+        ip = request.client.host
+
+    # Handle local/private IPs
     if not ip or ip in ("127.0.0.1", "::1") or ip.startswith(("192.168.", "10.", "172.")):
-        return default_location
+        return {"ip": ip or "local", "location": "本地网络", "country": "本地"}
+
     try:
-        response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=3)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("error"):
-            return {"ip": ip, "location": "Unknown", "country": "Unknown"}
+        # Try multiple geolocation services for better reliability
+        services = [
+            f"http://ip-api.com/json/{ip}?lang=zh-CN",
+            f"https://ipapi.co/{ip}/json/",
+            f"http://ipinfo.io/{ip}/json"
+        ]
 
-        country_name = data.get("country_name", "Unknown")
-        region = data.get("region", "")
+        for service_url in services:
+            try:
+                response = requests.get(service_url, timeout=5)
+                response.raise_for_status()
+                data = response.json()
 
-        location = f"中国 {region}".strip() if data.get("country_code") == "CN" and region else country_name
+                # Handle ip-api.com response
+                if "country" in data and "regionName" in data:
+                    country = data.get("country", "Unknown")
+                    region = data.get("regionName", "")
 
-        return {"ip": ip, "location": location, "country": country_name}
-    except requests.exceptions.RequestException:
-        return {"ip": ip, "location": "Unknown", "country": "Unknown"}
+                    if country == "China" and region:
+                        location = f"中国 {region}"
+                    else:
+                        location = country
+
+                    return {
+                        "ip": ip,
+                        "location": location,
+                        "country": country
+                    }
+
+                # Handle ipapi.co response
+                elif "country_name" in data:
+                    country_name = data.get("country_name", "Unknown")
+                    region = data.get("region", "")
+
+                    if data.get("country_code") == "CN" and region:
+                        location = f"中国 {region}"
+                    else:
+                        location = country_name
+
+                    return {
+                        "ip": ip,
+                        "location": location,
+                        "country": country_name
+                    }
+
+                # Handle ipinfo.io response
+                elif "country" in data:
+                    country = data.get("country", "Unknown")
+                    region = data.get("region", "")
+
+                    if country == "CN" and region:
+                        location = f"中国 {region}"
+                    else:
+                        location = data.get("country", "Unknown")
+
+                    return {
+                        "ip": ip,
+                        "location": location,
+                        "country": data.get("country", "Unknown")
+                    }
+
+            except requests.exceptions.RequestException:
+                continue
+
+        # If all services fail, return fallback
+        return {"ip": ip, "location": "未知位置", "country": "Unknown"}
+
+    except Exception as e:
+        print(f"Error getting IP info: {e}")
+        return {"ip": ip, "location": "未知位置", "country": "Unknown"}
 
 @app.middleware("http")
 async def log_visits_middleware(request: Request, call_next):
     """Logs a visit record for non-API GET requests to the root."""
     response = await call_next(request)
-    if request.method == "GET" and request.url.path == "/" and response.status_code == 200:
+
+    # Only log visits to the main page, not API calls
+    if (request.method == "GET" and
+        request.url.path == "/" and
+        response.status_code == 200):
+
         db: Session = next(get_db())
         try:
             ip_info = get_ip_info(request)
@@ -395,24 +463,73 @@ async def log_visits_middleware(request: Request, call_next):
             db.rollback()
         finally:
             db.close()
+
     return response
 
 # --- Core Logic Functions ---
+def extract_archive(file_bytes: bytes, file_ext: str) -> List[tuple]:
+    """Extract files from archive using libarchive-c for universal support."""
+    extracted_files = []
+
+    try:
+        # Create a temporary file for libarchive to work with
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_ext}') as temp_file:
+            temp_file.write(file_bytes)
+            temp_path = temp_file.name
+
+        try:
+            # Use libarchive to extract
+            with libarchive.file_reader(temp_path) as archive:
+                for entry in archive:
+                    if (entry.name.lower().endswith('.xlsx') and
+                        not entry.name.startswith('__MACOSX') and
+                        not entry.name.startswith('.') and
+                        not entry.isdir):
+
+                        # Read the file content
+                        file_content = b''.join(entry.get_blocks())
+                        filename = os.path.basename(entry.name)
+                        patient_id = os.path.splitext(filename)[0]
+
+                        extracted_files.append((patient_id, file_content))
+        finally:
+            # Clean up temporary file
+            os.unlink(temp_path)
+
+    except Exception as e:
+        print(f"Error extracting archive: {e}")
+        # Fallback to zipfile for .zip files
+        if file_ext == 'zip':
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                    for filename in zf.namelist():
+                        if (filename.lower().endswith('.xlsx') and
+                            not filename.startswith('__MACOSX') and
+                            not filename.startswith('.')):
+
+                            with zf.open(filename) as xlsx_file:
+                                content = xlsx_file.read()
+                                patient_id = os.path.splitext(os.path.basename(filename))[0]
+                                extracted_files.append((patient_id, content))
+            except Exception as zip_error:
+                print(f"Fallback zip extraction failed: {zip_error}")
+                raise HTTPException(status_code=400, detail=f"Failed to extract archive: {str(e)}")
+
+    return extracted_files
+
 def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
     """Parses the bilingual Excel template into a feature dictionary."""
     try:
         xls = pd.ExcelFile(io.BytesIO(contents))
-        sheet_names = ['数据上传表_基线特征', '数据上传表_实验室检查']
-        if not all(sheet in xls.sheet_names for sheet in sheet_names):
-            raise ValueError(f"Excel must contain sheets: {', '.join(sheet_names)}")
+        required_sheets = ['数据上传表_基线特征', '数据上传表_实验室检查']
 
-        # Parse baseline features
-        df_baseline = pd.read_excel(xls, sheet_name=sheet_names[0], header=0).fillna(0)
-        df_lab = pd.read_excel(xls, sheet_name=sheet_names[1], header=0).fillna(0)
+        if not all(sheet in xls.sheet_names for sheet in required_sheets):
+            raise ValueError(f"Excel must contain sheets: {', '.join(required_sheets)}")
 
         features = {}
 
-        # Process baseline features
+        # Parse baseline features
+        df_baseline = pd.read_excel(xls, sheet_name=required_sheets[0], header=0).fillna(0)
         for _, row in df_baseline.iterrows():
             var_name = row.get('variable_name')
             value = row.get('Value / 数值', 0)
@@ -422,9 +539,10 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
                 except (ValueError, TypeError):
                     features[var_name] = 0.0
 
-        # Process lab features
+        # Parse lab features
+        df_lab = pd.read_excel(xls, sheet_name=required_sheets[1], header=0).fillna(0)
         for _, row in df_lab.iterrows():
-            # Early pregnancy values
+            # Early pregnancy
             var_name_f = row.get('variable_name_f')
             early_value = row.get('Early P. / 早孕期', 0)
             if pd.notna(var_name_f) and var_name_f.strip():
@@ -433,7 +551,7 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
                 except (ValueError, TypeError):
                     features[var_name_f] = 0.0
 
-            # Mid pregnancy values
+            # Mid pregnancy
             var_name_s = row.get('variable_name_s')
             mid_value = row.get('Mid P. / 中孕期', 0)
             if pd.notna(var_name_s) and var_name_s.strip():
@@ -442,7 +560,7 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
                 except (ValueError, TypeError):
                     features[var_name_s] = 0.0
 
-            # Late pregnancy values
+            # Late pregnancy
             var_name_t = row.get('variable_name_t')
             late_value = row.get('Late P. / 晚孕期', 0)
             if pd.notna(var_name_t) and var_name_t.strip():
@@ -522,70 +640,28 @@ async def predict_batch(request: Request, file: UploadFile = File(...), db: Sess
     all_results: List[PatientPredictionResult] = []
 
     try:
-        archive_bytes = io.BytesIO(await file.read())
+        archive_bytes = await file.read()
+        extracted_files = extract_archive(archive_bytes, file_ext)
 
-        if file_ext == 'zip':
-            with zipfile.ZipFile(archive_bytes) as archive:
-                for filename in archive.namelist():
-                    if filename.lower().endswith('.xlsx') and not filename.startswith('__MACOSX') and not filename.startswith('.'):
-                        patient_id = os.path.splitext(os.path.basename(filename))[0]
-                        with archive.open(filename) as xlsx_file:
-                            contents = xlsx_file.read()
-                            features = parse_excel_to_features(contents)
-                            predictions = process_and_log_prediction(db, ip_info, patient_id, features)
-                            all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
+        if not extracted_files:
+            raise HTTPException(status_code=400, detail="No valid .xlsx files found in the archive.")
 
-        elif file_ext == 'rar':
-            with rarfile.RarFile(archive_bytes) as archive:
-                for filename in archive.namelist():
-                    if filename.lower().endswith('.xlsx') and not filename.startswith('__MACOSX') and not filename.startswith('.'):
-                        patient_id = os.path.splitext(os.path.basename(filename))[0]
-                        with archive.open(filename) as xlsx_file:
-                            contents = xlsx_file.read()
-                            features = parse_excel_to_features(contents)
-                            predictions = process_and_log_prediction(db, ip_info, patient_id, features)
-                            all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
-
-        elif file_ext == '7z':
-            with py7zr.SevenZipFile(archive_bytes) as archive:
-                # Get the list of files first
-                file_list = archive.getnames()
-                xlsx_files = [f for f in file_list if f.lower().endswith('.xlsx') and not f.startswith('__MACOSX') and not f.startswith('.')]
-
-                if xlsx_files:
-                    # Extract all xlsx files at once
-                    extracted_files = archive.read(xlsx_files)
-
-                    for filename in xlsx_files:
-                        if filename in extracted_files:
-                            patient_id = os.path.splitext(os.path.basename(filename))[0]
-                            # Get the file content from the extracted files dictionary
-                            file_buffer = extracted_files[filename]
-                            # Handle both file-like objects and bytes
-                            if hasattr(file_buffer, 'getvalue'):
-                                contents = file_buffer.getvalue()
-                            elif hasattr(file_buffer, 'read'):
-                                contents = file_buffer.read()
-                            else:
-                                contents = file_buffer
-
-                            features = parse_excel_to_features(contents)
-                            predictions = process_and_log_prediction(db, ip_info, patient_id, features)
-                            all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
+        for patient_id, xlsx_content in extracted_files:
+            try:
+                features = parse_excel_to_features(xlsx_content)
+                predictions = process_and_log_prediction(db, ip_info, patient_id, features)
+                all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
+            except Exception as e:
+                print(f"Error processing patient {patient_id}: {e}")
+                continue
 
         db.commit()
-    except zipfile.BadZipFile:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Invalid or corrupted ZIP file.")
-    except rarfile.BadRarFile:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Invalid or corrupted RAR file.")
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Batch processing error: {str(e)}")
 
     if not all_results:
-        raise HTTPException(status_code=400, detail="No valid .xlsx files found in the archive.")
+        raise HTTPException(status_code=400, detail="No patients could be processed successfully.")
     return all_results
 
 @app.get("/api/stats", response_model=StatsResponse)
@@ -593,9 +669,17 @@ async def get_stats(db: Session = Depends(get_db)):
     total_visits = db.query(func.count(VisitRecord.id)).scalar() or 0
     total_predictions = db.query(func.count(PredictionRecord.id)).scalar() or 0
 
-    valid_country_filter = PredictionRecord.country.isnot(None) & ~PredictionRecord.country.in_(["Unknown", "N/A", "Local Network"])
+    # Filter out invalid/local countries
+    valid_country_filter = (
+        PredictionRecord.country.isnot(None) &
+        ~PredictionRecord.country.in_(["Unknown", "N/A", "本地", "Local Network", "未知位置"])
+    )
 
-    unique_countries_count = db.query(func.count(func.distinct(PredictionRecord.country))).filter(valid_country_filter).scalar() or 0
+    unique_countries_count = (
+        db.query(func.count(func.distinct(PredictionRecord.country)))
+        .filter(valid_country_filter)
+        .scalar() or 0
+    )
 
     usage_ranking_query = (
         db.query(PredictionRecord.country, func.count(PredictionRecord.id).label("count"))
@@ -605,9 +689,14 @@ async def get_stats(db: Session = Depends(get_db)):
         .limit(10).all()
     )
 
+    visit_filter = (
+        VisitRecord.country.isnot(None) &
+        ~VisitRecord.country.in_(["Unknown", "N/A", "本地", "Local Network", "未知位置"])
+    )
+
     visit_ranking_query = (
         db.query(VisitRecord.country, func.count(VisitRecord.id).label("count"))
-        .filter(VisitRecord.country.isnot(None) & ~VisitRecord.country.in_(["Unknown", "N/A", "Local Network"]))
+        .filter(visit_filter)
         .group_by(VisitRecord.country)
         .order_by(func.count(VisitRecord.id).desc())
         .limit(10).all()
@@ -625,18 +714,18 @@ async def get_stats(db: Session = Depends(get_db)):
 async def download_template():
     """Generates and serves the bilingual Excel template with proper variable names."""
 
-    # Baseline features data
+    # Baseline features data with exact variable names matching formulas
     baseline_data = {
         'Feature Name (CN / EN)': [
-            '年龄 / Age',
-            '孕期体重增长 / Weight gain during pregnancy',
-            '孕前BMI / Pre-pregnancy BMI',
-            '民族 / Ethnicity (1: Han, 2: Minority)',
+            '年龄 / Age (years)',
+            '孕期体重增长 / Weight gain during pregnancy (kg)',
+            '孕前BMI / Pre-pregnancy BMI (kg/m²)',
+            '民族 / Ethnicity (1: Minority, 0: Han)',
             '甲状腺功能减退症 / Hypothyroidism (1: Yes, 0: No)',
-            '分娩孕周 / Gestational age (weeks)',
+            '分娩孕周 / Gestational age at delivery (weeks)',
             '出生体重 / Birth weight (g)',
             '出生身长 / Birth length (cm)',
-            '新生儿性别 / Gender (1: Male, 0: Female)',
+            '新生儿性别 / Gender of newborn (1: Male, 0: Female)',
             '子宫肌瘤 / Hysteromyoma (1: Yes, 0: No)',
             '分娩方式 / Delivery method (1: Cesarean, 0: Vaginal)',
             '新生儿转NICU / NICU admission (1: Yes, 0: No)',
@@ -647,7 +736,7 @@ async def download_template():
             '前置胎盘 / Placenta Previa (1: Yes, 0: No)',
             '产后出血 / Postpartum Hemorrhage (1: Yes, 0: No)'
         ],
-        'Value / 数值': [''] * 18,
+        'Value / 数值': [0] * 18,
         'variable_name': [
             'age_1st', 'weight_gain_1st', 'pre_bmi_1st', 'nation_1stminority', 'Hypothyroidism_1styes',
             'gestational_age_1st', 'birth_weight_1st', 'birth_length_1st', 'gender_1stmale', 'hysteromyoma_1styes',
@@ -656,7 +745,7 @@ async def download_template():
         ]
     }
 
-    # Lab test data - including all three pregnancy periods
+    # Lab test data - all variables used in formulas
     lab_vars = [
         ('PT', '凝血酶原时间', 'Prothrombin time'),
         ('APTT', '活化部分凝血活酶', 'Activated partial thromboplastin time'),
@@ -697,9 +786,9 @@ async def download_template():
 
     lab_data = {
         'Lab Test (CN / EN)': [f"{cn} / {en}" for abbr, cn, en in lab_vars],
-        'Early P. / 早孕期': [''] * len(lab_vars),
-        'Mid P. / 中孕期': [''] * len(lab_vars),
-        'Late P. / 晚孕期': [''] * len(lab_vars),
+        'Early P. / 早孕期': [0] * len(lab_vars),
+        'Mid P. / 中孕期': [0] * len(lab_vars),
+        'Late P. / 晚孕期': [0] * len(lab_vars),
         'variable_name_f': [f'{abbr}_1st_f' for abbr, _, _ in lab_vars],
         'variable_name_s': [f'{abbr}_1st_s' for abbr, _, _ in lab_vars],
         'variable_name_t': [f'{abbr}_1st_t' for abbr, _, _ in lab_vars]
@@ -713,7 +802,7 @@ async def download_template():
         df_baseline.to_excel(writer, sheet_name='数据上传表_基线特征', index=False)
         df_lab.to_excel(writer, sheet_name='数据上传表_实验室检查', index=False)
 
-        # Hide variable name columns
+        # Hide variable name columns for cleaner appearance
         ws_baseline = writer.sheets['数据上传表_基线特征']
         ws_baseline.column_dimensions['C'].hidden = True
 
@@ -728,3 +817,7 @@ async def download_template():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=Prediction_Template_Bilingual.xlsx"}
     )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

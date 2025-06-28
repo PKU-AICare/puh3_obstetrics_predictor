@@ -15,20 +15,21 @@ use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent
 // --- Configuration ---
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
-// --- Composable for i18n ---
+// --- i18n Composable ---
 const useI18n = () => {
   const locale = ref('zh')
 
   const messages = {
     zh: {
       title: '再次妊娠孕期疾病发生风险评估',
+      subtitle: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
       logo1_alt: '国家产科专业医疗质量控制中心',
       logo2_alt: '国家妇产疾病临床医学研究中心',
       logo3_alt: '北京大学第三医院',
       singlePatient: '单个患者预测',
-      singlePatientDesc: '上传单个患者的 Excel 文件 (.xlsx) 进行风险评估。文件名将作为患者ID。',
+      singlePatientDesc: '上传单个患者的 Excel 文件 (.xlsx)。文件名将作为患者ID。',
       batchPatient: '批量预测',
-      batchPatientDesc: '上传包含多个患者 Excel 文件的压缩包 (.zip / .rar / .7z) 进行批量预测。',
+      batchPatientDesc: '上传包含多个患者 Excel 文件的压缩包 (.zip / .rar / .7z)。',
       downloadTemplate: '下载模板',
       startCalc: '开始计算',
       uploadDrag: '将文件拖到此处，或',
@@ -59,16 +60,23 @@ const useI18n = () => {
       calcFailed: '计算失败: {detail}',
       exportSuccess: '结果已导出为 Excel 文件。',
       exportError: '导出失败: {detail}',
+      predictionTips: '提示：概率值显示为百分比形式，数值越高表示风险越大。',
+      riskLevel: {
+        low: '低风险',
+        medium: '中等风险',
+        high: '高风险'
+      }
     },
     en: {
-      title: 'Risk Assessment of Pregnancy-Related Diseases',
+      title: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
+      subtitle: '再次妊娠孕期疾病发生风险评估',
       logo1_alt: 'National Centre for Healthcare Quality Management in Obstetrics',
       logo2_alt: 'National Clinical Research Center for Obstetrics and Gynecology',
       logo3_alt: 'Peking University Third Hospital',
       singlePatient: 'Single Patient Prediction',
       singlePatientDesc: 'Upload a single patient\'s Excel file (.xlsx). The filename will be used as Patient ID.',
       batchPatient: 'Batch Prediction',
-      batchPatientDesc: 'Upload an archive (.zip / .rar / .7z) containing multiple patient Excel files for batch prediction.',
+      batchPatientDesc: 'Upload an archive (.zip / .rar / .7z) containing multiple patient Excel files.',
       downloadTemplate: 'Download Template',
       startCalc: 'Calculate',
       uploadDrag: 'Drag file here, or ',
@@ -99,6 +107,12 @@ const useI18n = () => {
       calcFailed: 'Calculation failed: {detail}',
       exportSuccess: 'Results have been exported to an Excel file.',
       exportError: 'Export failed: {detail}',
+      predictionTips: 'Tips: Probability values are shown as percentages. Higher values indicate greater risk.',
+      riskLevel: {
+        low: 'Low Risk',
+        medium: 'Medium Risk',
+        high: 'High Risk'
+      }
     }
   }
 
@@ -111,7 +125,7 @@ const useI18n = () => {
   return { locale, t, toggleLang }
 }
 
-// --- Composable for API calls ---
+// --- API Composable ---
 const useApi = () => {
   const fetchStats = async () => {
     try {
@@ -153,7 +167,7 @@ const useApi = () => {
   return { fetchStats, downloadTemplate, submitPrediction }
 }
 
-// --- Composable for file handling ---
+// --- File Upload Composable ---
 const useFileUpload = () => {
   const singleFile = ref(null)
   const batchFile = ref(null)
@@ -200,37 +214,66 @@ const useFileUpload = () => {
   }
 }
 
-// --- Composable for chart configuration ---
+// --- Chart Composable ---
 const useCharts = () => {
-  const getChartOption = (diseaseName, probability) => {
+  const getRiskLevel = (probability) => {
+    if (probability >= 0.5) return 'high'
+    if (probability >= 0.2) return 'medium'
+    return 'low'
+  }
+
+  const getRiskColor = (probability) => {
+    const level = getRiskLevel(probability)
+    const colors = {
+      low: '#67c23a',
+      medium: '#e6a23c',
+      high: '#f56c6c'
+    }
+    return colors[level]
+  }
+
+  const getChartOption = (diseaseName, probability, riskLabels) => {
     const probPercent = probability * 100
-    const color = probPercent > 50 ? '#f56c6c' : (probPercent > 20 ? '#e6a23c' : '#67c23a')
+    const color = getRiskColor(probability)
+    const riskLevel = getRiskLevel(probability)
 
     return {
       title: {
         text: diseaseName,
         left: 'center',
-        bottom: '5%',
+        bottom: '8%',
         textStyle: {
-          fontSize: 14,
-          fontWeight: 'normal',
+          fontSize: 13,
+          fontWeight: '600',
           color: '#606266',
           overflow: 'truncate',
-          width: 180
+          width: 200
         },
+      },
+      tooltip: {
+        trigger: 'item',
+        formatter: `${diseaseName}<br/>概率: {c}%<br/>风险等级: ${riskLabels[riskLevel]}`
       },
       series: [{
         type: 'pie',
-        radius: ['75%', '95%'],
+        radius: ['70%', '90%'],
         avoidLabelOverlap: false,
-        silent: true,
+        silent: false,
         label: {
           show: true,
           position: 'center',
           formatter: `${probPercent.toFixed(1)}%`,
-          fontSize: 22,
+          fontSize: 20,
           fontWeight: 'bold',
           color: color
+        },
+        emphasis: {
+          label: {
+            fontSize: 24,
+            fontWeight: 'bold'
+          },
+          scale: true,
+          scaleSize: 5
         },
         data: [
           {
@@ -248,7 +291,7 @@ const useCharts = () => {
     }
   }
 
-  return { getChartOption }
+  return { getChartOption, getRiskLevel, getRiskColor }
 }
 
 // --- Main component setup ---
@@ -257,7 +300,7 @@ const { fetchStats, downloadTemplate, submitPrediction } = useApi()
 const { singleFile, batchFile, singleUploadRef, batchUploadRef, handleFileChange, clearFile } = useFileUpload()
 const { getChartOption } = useCharts()
 
-// State
+// --- State ---
 const isLoadingSingle = ref(false)
 const isLoadingBatch = ref(false)
 const allPatientResults = ref([])
@@ -271,14 +314,21 @@ const stats = ref({
 })
 const chartGridKey = ref(0)
 
-// Computed
+// --- Computed ---
 const hasResults = computed(() => allPatientResults.value.length > 0)
 const currentPatientData = computed(() => {
   if (!selectedPatientId.value) return null
   return allPatientResults.value.find(p => p.patient_id === selectedPatientId.value)
 })
 
-// Methods
+const patientOptions = computed(() =>
+  allPatientResults.value.map(p => ({
+    value: p.patient_id,
+    label: `${p.patient_id} (${p.predictions.length} predictions)`
+  }))
+)
+
+// --- Methods ---
 const handleDownloadTemplate = async () => {
   const loading = ElLoading.service({
     lock: true,
@@ -287,6 +337,7 @@ const handleDownloadTemplate = async () => {
   })
   try {
     await downloadTemplate()
+    ElMessage.success('模板下载成功！')
   } catch (error) {
     ElMessage.error(t.value.templateError)
   } finally {
@@ -311,7 +362,7 @@ const handlePrediction = async (type) => {
   try {
     const results = await submitPrediction(file, endpoint)
 
-    // Update results
+    // Update results with deduplication
     results.forEach(result => {
       const existingIndex = allPatientResults.value.findIndex(p => p.patient_id === result.patient_id)
       if (existingIndex > -1) {
@@ -329,6 +380,7 @@ const handlePrediction = async (type) => {
       )
     }
 
+    // Refresh stats
     const newStats = await fetchStats()
     stats.value = newStats
   } catch (error) {
@@ -364,13 +416,13 @@ const exportResultsToExcel = () => {
   }
 }
 
-// Watchers
+// --- Watchers ---
 watch(locale, (newLang) => {
   document.documentElement.lang = newLang === 'zh' ? 'zh-CN' : 'en'
   document.title = t.value.title
 })
 
-// Lifecycle
+// --- Lifecycle ---
 onMounted(async () => {
   const newStats = await fetchStats()
   stats.value = newStats
@@ -380,31 +432,44 @@ onMounted(async () => {
 
 <template>
   <div class="app-container">
+    <!-- Header -->
     <header class="app-header">
       <div class="header-content container">
         <div class="logo-area">
-          <img src="/logo1.png" :alt="t.logo1_alt" class="logo-placeholder" />
-          <img src="/logo2.png" :alt="t.logo2_alt" class="logo-placeholder" />
-          <img src="/logo3.png" :alt="t.logo3_alt" class="logo-placeholder" />
+          <img src="/logo1.png" :alt="t.logo1_alt" class="logo-image" />
+          <img src="/logo2.png" :alt="t.logo2_alt" class="logo-image" />
+          <img src="/logo3.png" :alt="t.logo3_alt" class="logo-image" />
         </div>
-        <h1 class="app-title">{{ t.title }}</h1>
-        <el-button @click="toggleLang" type="primary" plain round>
-          {{ t.langSwitch }}
-        </el-button>
+
+        <div class="title-area">
+          <h1 class="app-title">{{ t.title }}</h1>
+          <p class="app-subtitle">{{ t.subtitle }}</p>
+        </div>
+
+        <div class="header-actions">
+          <el-button @click="toggleLang" type="primary" plain round size="large">
+            {{ t.langSwitch }}
+          </el-button>
+        </div>
       </div>
     </header>
 
+    <!-- Main Content -->
     <main class="container main-content">
       <div class="main-grid">
+        <!-- Control Panel -->
         <div class="control-panel">
-          <el-card class="box-card" shadow="hover">
+          <!-- Single Patient Card -->
+          <el-card class="prediction-card" shadow="hover">
             <template #header>
               <div class="card-header">
-                <el-icon><User /></el-icon>
+                <el-icon class="header-icon"><User /></el-icon>
                 <span>{{ t.singlePatient }}</span>
               </div>
             </template>
+
             <p class="card-description">{{ t.singlePatientDesc }}</p>
+
             <el-upload
               ref="singleUploadRef"
               drag
@@ -413,14 +478,16 @@ onMounted(async () => {
               :auto-upload="false"
               @change="(file) => handleFileChange(file, 'single', singleUploadRef)"
               accept=".xlsx"
+              class="upload-area"
             >
               <el-icon class="el-icon--upload"><upload-filled /></el-icon>
               <div class="el-upload__text">
                 {{ t.uploadDrag }}<em>{{ t.uploadClick }}</em>
               </div>
             </el-upload>
+
             <div class="button-group">
-              <el-button @click="handleDownloadTemplate" :icon="Download">
+              <el-button @click="handleDownloadTemplate" :icon="Download" size="large">
                 {{ t.downloadTemplate }}
               </el-button>
               <el-button
@@ -428,20 +495,24 @@ onMounted(async () => {
                 @click="handlePrediction('single')"
                 :loading="isLoadingSingle"
                 :icon="Position"
+                size="large"
               >
                 {{ t.startCalc }}
               </el-button>
             </div>
           </el-card>
 
-          <el-card class="box-card" shadow="hover">
+          <!-- Batch Prediction Card -->
+          <el-card class="prediction-card" shadow="hover">
             <template #header>
               <div class="card-header">
-                <el-icon><Files /></el-icon>
+                <el-icon class="header-icon"><Files /></el-icon>
                 <span>{{ t.batchPatient }}</span>
               </div>
             </template>
+
             <p class="card-description">{{ t.batchPatientDesc }}</p>
+
             <el-upload
               ref="batchUploadRef"
               drag
@@ -450,12 +521,14 @@ onMounted(async () => {
               :auto-upload="false"
               @change="(file) => handleFileChange(file, 'batch', batchUploadRef)"
               accept=".zip,.rar,.7z"
+              class="upload-area"
             >
               <el-icon class="el-icon--upload"><upload-filled /></el-icon>
               <div class="el-upload__text">
                 {{ t.uploadDrag }}<em>{{ t.uploadClick }}</em>
               </div>
             </el-upload>
+
             <div class="button-group-single">
               <el-button
                 type="success"
@@ -463,6 +536,7 @@ onMounted(async () => {
                 :loading="isLoadingBatch"
                 :icon="Promotion"
                 class="full-width-btn"
+                size="large"
               >
                 {{ t.processAndSubmit }}
               </el-button>
@@ -470,29 +544,37 @@ onMounted(async () => {
           </el-card>
         </div>
 
+        <!-- Results Panel -->
         <div class="results-panel">
-          <el-card class="box-card results-card" shadow="hover">
+          <el-card class="results-card" shadow="hover">
             <template #header>
-              <div class="card-header-flex">
+              <div class="results-header">
                 <div class="card-header">
-                  <el-icon><DataAnalysis /></el-icon>
+                  <el-icon class="header-icon"><DataAnalysis /></el-icon>
                   <span>{{ t.predictionResults }}</span>
                 </div>
+
                 <div v-if="hasResults" class="header-controls">
                   <el-select-v2
                     v-model="selectedPatientId"
-                    :options="allPatientResults.map(p => ({ value: p.patient_id, label: p.patient_id }))"
+                    :options="patientOptions"
                     :placeholder="t.patientSelection"
-                    style="width: 200px; margin-right: 12px;"
+                    style="width: 260px; margin-right: 12px;"
                     filterable
+                    size="default"
                   />
-                  <el-button @click="exportResultsToExcel" type="primary" :icon="Document">
+                  <el-button @click="exportResultsToExcel" type="primary" :icon="Document" size="default">
                     {{ t.downloadResults }}
                   </el-button>
                 </div>
               </div>
             </template>
-            <div v-if="currentPatientData" class="charts-grid-wrapper">
+
+            <div v-if="currentPatientData" class="results-content">
+              <div class="prediction-tips">
+                <el-alert :title="t.predictionTips" type="info" :closable="false" show-icon />
+              </div>
+
               <div class="charts-grid" :key="`${selectedPatientId}-${chartGridKey}`">
                 <div
                   v-for="pred in currentPatientData.predictions"
@@ -503,32 +585,40 @@ onMounted(async () => {
                     class="chart"
                     :option="getChartOption(
                       locale === 'zh' ? pred.disease_name_cn : pred.disease_name_en,
-                      pred.probability
+                      pred.probability,
+                      t.riskLevel
                     )"
                     autoresize
                   />
                 </div>
               </div>
             </div>
-            <el-empty v-else :description="t.noResults" class="full-height-empty" />
+
+            <el-empty v-else :description="t.noResults" class="full-height-empty">
+              <template #image>
+                <el-icon size="100" color="#c0c4cc"><DataAnalysis /></el-icon>
+              </template>
+            </el-empty>
           </el-card>
         </div>
       </div>
 
-      <el-card class="box-card stats-card" shadow="hover">
+      <!-- Statistics Card -->
+      <el-card class="stats-card" shadow="hover">
         <template #header>
           <div class="card-header">
-            <el-icon><TrendCharts /></el-icon>
+            <el-icon class="header-icon"><TrendCharts /></el-icon>
             <span>{{ t.stats }}</span>
           </div>
         </template>
+
         <div class="stats-overview">
           <div class="stat-item">
-            <div class="stat-value">{{ stats.total_visits }}</div>
+            <div class="stat-value">{{ stats.total_visits.toLocaleString() }}</div>
             <div class="stat-label">{{ t.totalVisits }}</div>
           </div>
           <div class="stat-item">
-            <div class="stat-value">{{ stats.total_predictions }}</div>
+            <div class="stat-value">{{ stats.total_predictions.toLocaleString() }}</div>
             <div class="stat-label">{{ t.totalPredictions }}</div>
           </div>
           <div class="stat-item">
@@ -536,23 +626,25 @@ onMounted(async () => {
             <div class="stat-label">{{ t.uniqueCountries }}</div>
           </div>
         </div>
+
         <div class="stats-rankings">
-          <div class="ranking-list">
+          <div class="ranking-section">
             <h3>{{ t.usageRanking }}</h3>
             <ul v-if="stats.usage_ranking_by_country.length > 0">
               <li v-for="(stat, index) in stats.usage_ranking_by_country" :key="stat.location">
-                <span class="rank-badge">{{ index + 1 }}</span>
+                <span class="rank-badge" :class="`rank-${index + 1}`">{{ index + 1 }}</span>
                 <span class="location">{{ stat.location }}</span>
                 <span class="count">{{ stat.count }}</span>
               </li>
             </ul>
             <el-empty v-else :description="t.noData" :image-size="50" />
           </div>
-          <div class="ranking-list">
+
+          <div class="ranking-section">
             <h3>{{ t.visitRanking }}</h3>
             <ul v-if="stats.visit_ranking_by_country.length > 0">
               <li v-for="(stat, index) in stats.visit_ranking_by_country" :key="stat.location">
-                <span class="rank-badge">{{ index + 1 }}</span>
+                <span class="rank-badge" :class="`rank-${index + 1}`">{{ index + 1 }}</span>
                 <span class="location">{{ stat.location }}</span>
                 <span class="count">{{ stat.count }}</span>
               </li>
@@ -563,9 +655,12 @@ onMounted(async () => {
       </el-card>
     </main>
 
+    <!-- Footer -->
     <footer class="app-footer">
-      <p>{{ t.footerLine1 }}</p>
-      <p class="eng-footer">{{ t.footerLine2 }}</p>
+      <div class="footer-content">
+        <p class="footer-cn">{{ t.footerLine1 }}</p>
+        <p class="footer-en">{{ t.footerLine2 }}</p>
+      </div>
     </footer>
   </div>
 </template>
@@ -580,13 +675,20 @@ onMounted(async () => {
   --color-text-primary: #303133;
   --color-text-regular: #606266;
   --color-text-secondary: #909399;
-  --border-color: #dcdfe6;
-  --bg-color-page: #f5f7fa;
+  --color-border: #dcdfe6;
+  --color-border-light: #ebeef5;
+  --bg-color-page: #f8fafc;
   --bg-color-card: #ffffff;
-  --font-family-main: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
-  --card-border-radius: 12px;
   --shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
   --shadow-base: 0 2px 4px rgba(0, 0, 0, 0.12), 0 0 6px rgba(0, 0, 0, 0.04);
+  --border-radius: 12px;
+  --border-radius-large: 16px;
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 1rem;
+  --spacing-md: 1.5rem;
+  --spacing-lg: 2rem;
+  --spacing-xl: 2.5rem;
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 }
 
 * {
@@ -595,169 +697,151 @@ onMounted(async () => {
 
 body {
   margin: 0;
-  font-family: var(--font-family-main);
+  font-family: var(--font-family);
   background-color: var(--bg-color-page);
   color: var(--color-text-primary);
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 .container {
   width: 95%;
-  max-width: 1600px;
+  max-width: 1400px;
   margin: 0 auto;
 }
 
-.app-container {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-
+/* Header Styles */
 .app-header {
-  background: var(--bg-color-card);
-  padding: 1.5rem 0;
-  border-bottom: 1px solid #e4e7ed;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+  padding: var(--spacing-lg) 0;
+  border-bottom: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-base);
   position: sticky;
   top: 0;
   z-index: 100;
+  backdrop-filter: blur(10px);
 }
 
 .header-content {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 1rem;
+  gap: var(--spacing-lg);
 }
 
 .logo-area {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
+  gap: var(--spacing-md);
 }
 
-.logo-placeholder {
-  height: 45px;
+.logo-image {
+  height: 50px;
   width: auto;
   object-fit: contain;
-  background-color: transparent;
-  border-radius: 6px;
-  transition: transform 0.2s ease;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  background: transparent;
 }
 
-.logo-placeholder:hover {
-  transform: scale(1.05);
+.logo-image:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.1);
+}
+
+.title-area {
+  text-align: center;
 }
 
 .app-title {
-  font-size: 1.75rem;
+  font-size: 1.8rem;
   font-weight: 700;
   color: var(--color-text-primary);
-  text-align: center;
-  flex-grow: 1;
-  margin: 0;
-  background: linear-gradient(135deg, #409eff, #67c23a);
+  margin: 0 0 0.25rem 0;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-success));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
+.app-subtitle {
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+  margin: 0;
+  font-weight: 500;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+}
+
+/* Main Content */
 .main-content {
-  padding: 2.5rem 0;
-  flex-grow: 1;
+  padding: var(--spacing-xl) 0;
+  min-height: calc(100vh - 200px);
 }
 
 .main-grid {
   display: grid;
   grid-template-columns: minmax(400px, 1fr) 2fr;
-  gap: 2.5rem;
+  gap: var(--spacing-xl);
   align-items: flex-start;
+  margin-bottom: var(--spacing-xl);
 }
 
-.app-footer {
-  background: linear-gradient(135deg, #303133, #262629);
-  color: rgba(255, 255, 255, 0.7);
-  text-align: center;
-  padding: 2rem 1rem;
-  font-size: 0.9rem;
-  line-height: 1.8;
-  border-top: 1px solid #409eff;
+/* Control Panel */
+.control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
 }
 
-.app-footer p {
-  margin: 0.5rem 0;
-}
-
-.eng-footer {
-  opacity: 0.85;
-  font-size: 0.85rem;
-}
-
-.box-card {
+.prediction-card {
   border: none;
-  border-radius: var(--card-border-radius);
+  border-radius: var(--border-radius-large);
   overflow: hidden;
   transition: all 0.3s ease;
 }
 
-.box-card:hover {
+.prediction-card:hover {
+  transform: translateY(-4px);
   box-shadow: var(--shadow-light);
-  transform: translateY(-2px);
-}
-
-.el-card {
-  --el-card-padding: 28px;
-}
-
-.el-card__header {
-  border-bottom: 2px solid #f0f2f5;
-  background: linear-gradient(90deg, #fafcfe, #f8fafc);
 }
 
 .card-header {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  font-size: 1.2rem;
+  gap: var(--spacing-xs);
+  font-size: 1.25rem;
   font-weight: 700;
   color: var(--color-text-primary);
 }
 
-.card-header .el-icon {
-  font-size: 1.4rem;
+.header-icon {
+  font-size: 1.5rem;
   color: var(--color-primary);
 }
 
 .card-description {
   font-size: 0.95rem;
   color: var(--color-text-regular);
-  margin: 0 0 2rem 0;
+  margin: 0 0 var(--spacing-lg) 0;
   line-height: 1.7;
   background-color: #f8fafc;
-  padding: 1rem;
-  border-radius: 8px;
+  padding: var(--spacing-md);
+  border-radius: var(--border-radius);
   border-left: 4px solid var(--color-primary);
 }
 
-.button-group {
-  margin-top: 2rem;
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.button-group-single {
-  margin-top: 2rem;
-}
-
-.full-width-btn {
-  width: 100%;
+.upload-area {
+  margin-bottom: var(--spacing-lg);
 }
 
 .el-upload-dragger {
-  padding: 3rem 2rem;
-  border-radius: 12px;
+  padding: var(--spacing-xl) var(--spacing-lg);
+  border-radius: var(--border-radius-large);
   border: 2px dashed #d9ecff;
   background-color: #fafcff;
   transition: all 0.3s ease;
@@ -768,69 +852,64 @@ body {
   background-color: var(--color-primary-light);
 }
 
-.control-panel {
+.button-group {
   display: flex;
-  flex-direction: column;
-  gap: 2rem;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
 }
 
+.button-group-single {
+  display: flex;
+}
+
+.full-width-btn {
+  width: 100%;
+}
+
+/* Results Panel */
 .results-card {
-  display: flex;
-  flex-direction: column;
+  border: none;
+  border-radius: var(--border-radius-large);
+  overflow: hidden;
   min-height: 700px;
-  height: 100%;
 }
 
-.results-card .el-card__body {
-  flex-grow: 1;
-  padding: 15px;
-  display: flex;
-  flex-direction: column;
-}
-
-.full-height-empty {
-  flex-grow: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.card-header-flex {
+.results-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: var(--spacing-sm);
 }
 
 .header-controls {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
 }
 
-.charts-grid-wrapper {
-  overflow-y: auto;
-  flex-grow: 1;
-  margin: 0 -15px;
-  padding: 10px 15px;
+.results-content {
+  height: 100%;
+}
+
+.prediction-tips {
+  margin-bottom: var(--spacing-lg);
 }
 
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 1.5rem;
-  padding: 15px 0;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: var(--spacing-lg);
+  padding: var(--spacing-sm) 0;
 }
 
 .chart-container {
-  display: flex;
-  flex-direction: column;
   background: linear-gradient(135deg, #fafcfe, #f8fafc);
-  border: 2px solid #f0f2f5;
-  border-radius: 12px;
-  padding: 15px 10px;
-  height: 230px;
+  border: 2px solid var(--color-border-light);
+  border-radius: var(--border-radius-large);
+  padding: var(--spacing-md);
+  height: 240px;
   transition: all 0.3s ease;
   position: relative;
   overflow: hidden;
@@ -842,7 +921,7 @@ body {
   top: 0;
   left: 0;
   right: 0;
-  height: 3px;
+  height: 4px;
   background: linear-gradient(90deg, var(--color-primary), var(--color-success));
   opacity: 0;
   transition: opacity 0.3s ease;
@@ -853,8 +932,8 @@ body {
 }
 
 .chart-container:hover {
-  transform: translateY(-5px);
-  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.12);
+  transform: translateY(-6px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.15);
   border-color: var(--color-primary);
 }
 
@@ -863,88 +942,99 @@ body {
   height: 100%;
 }
 
+.full-height-empty {
+  height: 400px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Statistics Card */
 .stats-card {
-  margin-top: 2.5rem;
+  border: none;
+  border-radius: var(--border-radius-large);
+  overflow: hidden;
 }
 
 .stats-overview {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-lg);
   text-align: center;
-  padding: 2rem 0;
-  border-bottom: 2px solid #f0f2f5;
-  gap: 2rem;
+  padding: var(--spacing-xl) 0;
+  border-bottom: 2px solid var(--color-border-light);
 }
 
 .stat-item {
-  padding: 1rem;
-  border-radius: 12px;
+  padding: var(--spacing-lg);
+  border-radius: var(--border-radius-large);
   background: linear-gradient(135deg, #fafcfe, #f8fafc);
   transition: all 0.3s ease;
 }
 
 .stat-item:hover {
-  transform: translateY(-3px);
+  transform: translateY(-4px);
   box-shadow: var(--shadow-light);
 }
 
-.stat-item .stat-value {
-  font-size: 3rem;
+.stat-value {
+  font-size: 3.5rem;
   font-weight: 800;
   background: linear-gradient(135deg, var(--color-primary), var(--color-success));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
   font-family: 'SF Pro Display', -apple-system, sans-serif;
+  line-height: 1.2;
 }
 
-.stat-item .stat-label {
+.stat-label {
   font-size: 1.1rem;
   color: var(--color-text-secondary);
-  margin-top: 0.75rem;
-  font-weight: 500;
+  margin-top: var(--spacing-sm);
+  font-weight: 600;
 }
 
 .stats-rankings {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 3rem;
-  padding-top: 2.5rem;
+  gap: var(--spacing-xl);
+  padding-top: var(--spacing-xl);
 }
 
-.ranking-list h3 {
-  font-size: 1.3rem;
-  margin: 0 0 1.5rem 0;
+.ranking-section h3 {
+  font-size: 1.4rem;
+  margin: 0 0 var(--spacing-lg) 0;
   color: var(--color-text-primary);
   border-bottom: 3px solid var(--color-primary);
-  padding-bottom: 12px;
+  padding-bottom: var(--spacing-sm);
   display: inline-block;
   font-weight: 700;
 }
 
-.ranking-list ul {
+.ranking-section ul {
   list-style: none;
   padding: 0;
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 1.2rem;
+  gap: var(--spacing-md);
 }
 
-.ranking-list li {
+.ranking-section li {
   display: flex;
   align-items: center;
   font-size: 1rem;
   color: var(--color-text-regular);
-  padding: 1rem;
+  padding: var(--spacing-md);
   background-color: #fafcfe;
-  border-radius: 10px;
+  border-radius: var(--border-radius);
   transition: all 0.3s ease;
 }
 
-.ranking-list li:hover {
+.ranking-section li:hover {
   background-color: var(--color-primary-light);
-  transform: translateX(5px);
+  transform: translateX(6px);
 }
 
 .rank-badge {
@@ -952,152 +1042,268 @@ body {
   color: var(--color-text-secondary);
   font-weight: 800;
   border-radius: 50%;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-right: 1.5rem;
+  margin-right: var(--spacing-md);
   flex-shrink: 0;
   font-size: 0.9rem;
 }
 
-.ranking-list li:nth-child(1) .rank-badge {
+.rank-badge.rank-1 {
   background: linear-gradient(135deg, #ffd700, #ffed4e);
   color: #8b5a00;
-  box-shadow: 0 2px 8px rgba(255, 215, 0, 0.3);
+  box-shadow: 0 4px 12px rgba(255, 215, 0, 0.4);
 }
 
-.ranking-list li:nth-child(2) .rank-badge {
+.rank-badge.rank-2 {
   background: linear-gradient(135deg, #c0c0c0, #e5e5e5);
   color: #666;
-  box-shadow: 0 2px 8px rgba(192, 192, 192, 0.3);
+  box-shadow: 0 4px 12px rgba(192, 192, 192, 0.4);
 }
 
-.ranking-list li:nth-child(3) .rank-badge {
+.rank-badge.rank-3 {
   background: linear-gradient(135deg, #cd7f32, #d4a574);
   color: #5a3a1a;
-  box-shadow: 0 2px 8px rgba(205, 127, 50, 0.3);
+  box-shadow: 0 4px 12px rgba(205, 127, 50, 0.4);
 }
 
-.ranking-list .location {
+.ranking-section .location {
   flex-grow: 1;
   font-weight: 600;
   color: var(--color-text-primary);
 }
 
-.ranking-list .count {
+.ranking-section .count {
   font-weight: 800;
   color: var(--color-primary);
   background-color: var(--color-primary-light);
-  padding: 0.25rem 0.75rem;
+  padding: 0.4rem 1rem;
   border-radius: 20px;
   font-size: 0.9rem;
+}
+
+/* Footer */
+.app-footer {
+  background: linear-gradient(135deg, #303133, #262629);
+  color: rgba(255, 255, 255, 0.8);
+  text-align: center;
+  padding: var(--spacing-xl) var(--spacing-sm);
+  border-top: 2px solid var(--color-primary);
+}
+
+.footer-content {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.footer-cn,
+.footer-en {
+  margin: var(--spacing-xs) 0;
+  line-height: 1.8;
+}
+
+.footer-cn {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.footer-en {
+  font-size: 0.9rem;
+  opacity: 0.9;
 }
 
 /* Responsive Design */
 @media (max-width: 1200px) {
   .main-grid {
     grid-template-columns: 1fr;
-    gap: 2rem;
+    gap: var(--spacing-lg);
   }
 
   .results-panel {
     order: -1;
   }
 
-  .app-title {
-    font-size: 1.5rem;
-  }
-
   .charts-grid {
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--spacing-md);
   }
 }
 
 @media (max-width: 768px) {
   .header-content {
-    flex-direction: column;
-    gap: 1.5rem;
-    align-items: center;
+    grid-template-columns: 1fr;
+    gap: var(--spacing-md);
+    text-align: center;
   }
 
   .logo-area {
     order: 2;
-    gap: 1rem;
+    justify-content: center;
+    gap: var(--spacing-sm);
   }
 
-  .logo-placeholder {
-    height: 35px;
+  .logo-image {
+    height: 40px;
+  }
+
+  .title-area {
+    order: 1;
   }
 
   .app-title {
-    order: 1;
-    font-size: 1.3rem;
+    font-size: 1.5rem;
   }
 
-  .el-button {
+  .app-subtitle {
+    font-size: 0.8rem;
+  }
+
+  .header-actions {
     order: 3;
+    justify-content: center;
   }
 
   .stats-overview,
   .stats-rankings {
     grid-template-columns: 1fr;
-    gap: 1.5rem;
+    gap: var(--spacing-md);
   }
 
   .charts-grid {
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    gap: 1rem;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--spacing-sm);
   }
 
   .chart-container {
-    height: 200px;
-    padding: 10px 5px;
+    height: 220px;
+    padding: var(--spacing-sm);
   }
 
-  .card-header-flex {
+  .results-header {
     flex-direction: column;
-    align-items: flex-start;
-    gap: 1rem;
+    align-items: stretch;
+    gap: var(--spacing-md);
   }
 
   .header-controls {
-    display: flex;
+    justify-content: stretch;
     flex-direction: column;
-    align-items: stretch;
-    width: 100%;
-    gap: 0.75rem;
   }
 
   .header-controls .el-select-v2 {
     margin-right: 0 !important;
+    margin-bottom: var(--spacing-sm);
   }
 
   .main-content {
-    padding: 1.5rem 0;
+    padding: var(--spacing-lg) 0;
   }
 
   .container {
     width: 98%;
   }
+
+  .button-group {
+    flex-direction: column;
+    gap: var(--spacing-sm);
+  }
 }
 
 @media (max-width: 480px) {
   .app-title {
-    font-size: 1.1rem;
+    font-size: 1.3rem;
   }
 
   .logo-area {
-    gap: 0.5rem;
+    gap: 0.75rem;
   }
 
-  .logo-placeholder {
-    height: 30px;
+  .logo-image {
+    height: 35px;
   }
 
-  .stat-item .stat-value {
-    font-size: 2.2rem;
+  .stat-value {
+    font-size: 2.5rem;
   }
+
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-container {
+    height: 200px;
+  }
+}
+
+/* Element Plus Customizations */
+.el-card {
+  --el-card-padding: 24px;
+}
+
+.el-card__header {
+  border-bottom: 2px solid var(--color-border-light);
+  background: linear-gradient(90deg, #fafcfe, #f8fafc);
+  padding: 20px 24px;
+}
+
+.el-alert {
+  border-radius: var(--border-radius);
+}
+
+.el-button {
+  border-radius: var(--border-radius);
+  font-weight: 600;
+}
+
+.el-button--large {
+  padding: 14px 24px;
+  font-size: 1rem;
+}
+
+.el-select-v2 {
+  border-radius: var(--border-radius);
+}
+
+/* Chart animations */
+.chart-container {
+  animation: fadeInUp 0.6s ease-out;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Loading states */
+.el-loading-mask {
+  border-radius: var(--border-radius-large);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-border-light);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-primary);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #337ecc;
 }
 </style>
