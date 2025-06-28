@@ -634,47 +634,82 @@ body {
 .button-group { display: flex; gap: var(--spacing-md); margin-top: auto; padding-top: var(--spacing-lg); }
 .button-group .el-button { flex-grow: 1; }
 
-/* --- Results Panel (Right) --- */
-.results-panel-card {
-  min-height: 440px; /* MODIFIED: Adjusted for a more compact 7x2 grid */
+/* --- Results Panel (Right) - OPTIMIZED --- */
+.results-panel-card .el-card__body {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
 }
-.results-panel-card .el-card__body { flex-grow: 1; display: flex; flex-direction: column; padding: 0; }
-.results-header { display: flex; justify-content: space-between; align-items: center; width: 100%; }
-.header-controls { display: flex; align-items: center; gap: var(--spacing-md); }
-.results-content { flex-grow: 1; padding: var(--spacing-lg); overflow-y: auto; }
+.results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+.results-content {
+  flex-grow: 1;
+  padding: var(--spacing-md); /* MODIFIED: More compact padding */
+  overflow-y: auto;
+}
 
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr); /* MODIFIED: Enforce a 7-column layout */
-  gap: var(--spacing-md); /* MODIFIED: Slightly reduced gap for a compact look */
+  grid-template-columns: repeat(7, 1fr); /* Enforce a 7-column layout with equal width */
+  gap: 12px; /* MODIFIED: Reduced gap for a compact look */
 }
+
 .chart-container {
   background-color: var(--bg-color-page);
   border: 1px solid var(--color-border-light);
   border-radius: var(--border-radius);
   padding: var(--spacing-sm);
-  height: 150px; /* MODIFIED: Adjusted for new compact design */
+  height: 160px; /* MODIFIED: Slightly taller for better chart aesthetics */
   display: flex;
   flex-direction: column;
   transition: all 0.2s ease;
+  min-width: 0; /* KEY FIX: Allows grid item to shrink and content to truncate */
+  overflow: hidden; /* Ensures no content spills out */
 }
+
 .chart-container:hover {
   transform: translateY(-3px);
   box-shadow: var(--shadow);
-  border-color: var(--color-primary);
+  border-color: var(--color-primary); /* MODIFIED: Added hover feedback */
 }
+
 .disease-title {
+  flex-shrink: 0; /* Prevents title from being squished by the chart */
   font-size: 0.9rem;
   font-weight: 500;
   text-align: center;
   padding: var(--spacing-sm);
+  color: var(--color-text-primary);
+  /* These three properties ensure long text is truncated with an ellipsis */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--color-text-primary);
 }
-.chart { flex-grow: 1; width: 100%; height: 100%; }
-.full-height-empty { flex-grow: 1; display: flex; align-items: center; justify-content: center; padding: var(--spacing-lg); }
+
+.chart {
+  flex-grow: 1; /* Allows chart to fill remaining vertical space */
+  width: 100%;
+  min-height: 0; /* Good practice for flex items to allow shrinking */
+}
+
+.full-height-empty {
+  flex-grow: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-lg);
+}
+
 
 /* --- Statistics Card --- */
 .stats-card .el-card__body { padding: var(--spacing-lg); }
@@ -718,7 +753,8 @@ body {
   .title-area { text-align: center; }
   .stats-overview, .stats-rankings { grid-template-columns: 1fr; }
   .stats-rankings { gap: var(--spacing-lg); }
-  .charts-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
-  .chart-container { height: 150px; }
+  /* Make charts grid responsive on smaller screens */
+  .charts-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .chart-container { height: 160px; }
 }
 </style>
