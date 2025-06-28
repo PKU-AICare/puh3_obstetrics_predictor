@@ -433,6 +433,15 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
                 except (ValueError, TypeError):
                     features[var_name_f] = 0.0
 
+            # Mid pregnancy values
+            var_name_s = row.get('variable_name_s')
+            mid_value = row.get('Mid P. / 中孕期', 0)
+            if pd.notna(var_name_s) and var_name_s.strip():
+                try:
+                    features[var_name_s] = float(mid_value) if pd.notna(mid_value) else 0.0
+                except (ValueError, TypeError):
+                    features[var_name_s] = 0.0
+
             # Late pregnancy values
             var_name_t = row.get('variable_name_t')
             late_value = row.get('Late P. / 晚孕期', 0)
@@ -552,7 +561,14 @@ async def predict_batch(request: Request, file: UploadFile = File(...), db: Sess
                             patient_id = os.path.splitext(os.path.basename(filename))[0]
                             # Get the file content from the extracted files dictionary
                             file_buffer = extracted_files[filename]
-                            contents = file_buffer.getvalue() if hasattr(file_buffer, 'getvalue') else file_buffer.read()
+                            # Handle both file-like objects and bytes
+                            if hasattr(file_buffer, 'getvalue'):
+                                contents = file_buffer.getvalue()
+                            elif hasattr(file_buffer, 'read'):
+                                contents = file_buffer.read()
+                            else:
+                                contents = file_buffer
+
                             features = parse_excel_to_features(contents)
                             predictions = process_and_log_prediction(db, ip_info, patient_id, features)
                             all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
@@ -640,7 +656,7 @@ async def download_template():
         ]
     }
 
-    # Lab test data
+    # Lab test data - including all three pregnancy periods
     lab_vars = [
         ('PT', '凝血酶原时间', 'Prothrombin time'),
         ('APTT', '活化部分凝血活酶', 'Activated partial thromboplastin time'),
@@ -682,8 +698,10 @@ async def download_template():
     lab_data = {
         'Lab Test (CN / EN)': [f"{cn} / {en}" for abbr, cn, en in lab_vars],
         'Early P. / 早孕期': [''] * len(lab_vars),
+        'Mid P. / 中孕期': [''] * len(lab_vars),
         'Late P. / 晚孕期': [''] * len(lab_vars),
         'variable_name_f': [f'{abbr}_1st_f' for abbr, _, _ in lab_vars],
+        'variable_name_s': [f'{abbr}_1st_s' for abbr, _, _ in lab_vars],
         'variable_name_t': [f'{abbr}_1st_t' for abbr, _, _ in lab_vars]
     }
 
@@ -700,8 +718,9 @@ async def download_template():
         ws_baseline.column_dimensions['C'].hidden = True
 
         ws_lab = writer.sheets['数据上传表_实验室检查']
-        ws_lab.column_dimensions['D'].hidden = True
-        ws_lab.column_dimensions['E'].hidden = True
+        ws_lab.column_dimensions['E'].hidden = True  # variable_name_f
+        ws_lab.column_dimensions['F'].hidden = True  # variable_name_s
+        ws_lab.column_dimensions['G'].hidden = True  # variable_name_t
 
     output_buffer.seek(0)
     return StreamingResponse(
