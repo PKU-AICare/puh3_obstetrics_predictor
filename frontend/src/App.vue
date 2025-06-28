@@ -140,11 +140,21 @@ const useApi = () => {
   return { logVisit, fetchStats, downloadTemplate, submitPrediction }
 }
 
-// --- Chart Composable ---
+// --- Chart Composable (REVISED AND FIXED) ---
 const useCharts = () => {
   const getChartOption = (probability) => {
-    const probPercent = probability * 100
-    const color = probPercent >= 50 ? '#f56c6c' : probPercent >= 20 ? '#e6a23c' : '#67c23a'
+    // Ensure probability is a valid number (0-100), defaulting to 0 if not.
+    const probPercent = (typeof probability === 'number' && !isNaN(probability)) ? probability : 0;
+
+    let color;
+    // Define risk levels and corresponding colors based on percentage (0-100)
+    if (probPercent >= 50) {
+      color = '#f56c6c'; // Danger (Red)
+    } else if (probPercent >= 20) {
+      color = '#e6a23c'; // Warning (Orange)
+    } else {
+      color = '#67c23a'; // Success (Green)
+    }
 
     return {
       series: [{
@@ -156,20 +166,28 @@ const useCharts = () => {
         label: {
           show: true,
           position: 'center',
-          formatter: `{c}%`,
+          // DEFINITIVE FIX: Use a formatter function.
+          // This completely decouples the displayed text from the data values.
+          // The text will ALWAYS be the correct `probPercent`, while the data
+          // values below are only used for visual representation of the ring.
+          formatter: () => `${probPercent.toFixed(1)}%`,
           fontSize: 18,
           fontWeight: 'bold',
           color: color,
         },
+        // Data for visual representation ONLY.
         data: [
-          { value: probPercent.toFixed(1), name: 'Probability', itemStyle: { color: color } },
-          { value: (100 - probPercent).toFixed(1), name: 'Remaining', itemStyle: { color: '#f0f2f5' } }
+          // This part determines the size of the colored slice.
+          { value: probPercent, name: 'Probability', itemStyle: { color: color } },
+          // This part determines the size of the grey "remaining" slice.
+          { value: 100 - probPercent, name: 'Remaining', itemStyle: { color: '#f0f2f5' } }
         ]
       }]
-    }
+    };
   }
-  return { getChartOption }
+  return { getChartOption };
 }
+
 
 // --- Main component setup ---
 const { locale, t, toggleLang } = useI18n()
@@ -280,7 +298,8 @@ const exportResultsToExcel = () => {
         'Disease Abbreviation': pred.disease_abbr,
         '疾病名称 (CN)': pred.disease_name_cn,
         'Disease Name (EN)': pred.disease_name_en,
-        'Probability (%)': (pred.probability * 100).toFixed(2)
+        // The value is already a percentage. Just format it to 2 decimal places.
+        'Probability (%)': pred.probability.toFixed(2)
       }))
     )
     const worksheet = XLSX.utils.json_to_sheet(dataToExport)
@@ -654,14 +673,14 @@ body {
 }
 .results-content {
   flex-grow: 1;
-  padding: var(--spacing-md); /* MODIFIED: More compact padding */
+  padding: var(--spacing-md);
   overflow-y: auto;
 }
 
 .charts-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr); /* Enforce a 7-column layout with equal width */
-  gap: 12px; /* MODIFIED: Reduced gap for a compact look */
+  gap: 12px;
 }
 
 .chart-container {
@@ -669,7 +688,7 @@ body {
   border: 1px solid var(--color-border-light);
   border-radius: var(--border-radius);
   padding: var(--spacing-sm);
-  height: 160px; /* MODIFIED: Slightly taller for better chart aesthetics */
+  height: 160px;
   display: flex;
   flex-direction: column;
   transition: all 0.2s ease;
@@ -680,26 +699,25 @@ body {
 .chart-container:hover {
   transform: translateY(-3px);
   box-shadow: var(--shadow);
-  border-color: var(--color-primary); /* MODIFIED: Added hover feedback */
+  border-color: var(--color-primary);
 }
 
 .disease-title {
-  flex-shrink: 0; /* Prevents title from being squished by the chart */
+  flex-shrink: 0;
   font-size: 0.9rem;
   font-weight: 500;
   text-align: center;
   padding: var(--spacing-sm);
   color: var(--color-text-primary);
-  /* These three properties ensure long text is truncated with an ellipsis */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .chart {
-  flex-grow: 1; /* Allows chart to fill remaining vertical space */
+  flex-grow: 1;
   width: 100%;
-  min-height: 0; /* Good practice for flex items to allow shrinking */
+  min-height: 0;
 }
 
 .full-height-empty {
@@ -734,7 +752,6 @@ body {
   color: #e5e7eb;
   text-align: center;
   padding: var(--spacing-lg) 0;
-  font-size: 0.9rem;
   margin-top: auto; /* Important for flex layout */
   flex-shrink: 0;
 }

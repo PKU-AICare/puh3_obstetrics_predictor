@@ -212,26 +212,45 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Error parsing Excel file: {str(e)}")
 
+# --- MODIFIED FUNCTION ---
 def calculate_probabilities(features: Dict[str, float]) -> List[Dict[str, Any]]:
+    """
+    Calculates disease probabilities, converts them to percentages,
+    and rounds to two decimal places.
+    """
     results = []
     for abbr, data in DISEASE_FORMULAS.items():
         logit = sum(coeff * features.get(var, 0.0) for var, coeff in data["coeffs"].items())
         try:
-            probability = 1 / (1 + math.exp(-logit))
+            # Calculate raw probability (0.0 to 1.0)
+            raw_probability = 1 / (1 + math.exp(-logit))
         except OverflowError:
-            probability = 1.0 if logit > 0 else 0.0
+            raw_probability = 1.0 if logit > 0 else 0.0
+
+        # Convert to percentage and round to two decimal places as requested
+        percentage_probability = round(raw_probability * 100, 2)
+
         results.append({
-            "disease_abbr": abbr, "disease_name_cn": data["name_cn"],
-            "disease_name_en": data["name_en"], "probability": probability
+            "disease_abbr": abbr,
+            "disease_name_cn": data["name_cn"],
+            "disease_name_en": data["name_en"],
+            "probability": percentage_probability  # Return the formatted percentage
         })
     return results
 
 def process_and_log_prediction(db: Session, ip_info: dict, patient_id: str, features: dict):
+    # This function now receives and logs the formatted percentage probabilities
     predictions = calculate_probabilities(features)
+
+    # The `results_for_db` dictionary will contain the percentage values (e.g., 95.03)
     results_for_db = {p["disease_abbr"]: p["probability"] for p in predictions}
+
     db_record = PredictionRecord(
-        patient_id=patient_id, ip_address=ip_info["ip"], location=ip_info["location"],
-        country=ip_info["country"], input_features_json=json.dumps(features),
+        patient_id=patient_id,
+        ip_address=ip_info["ip"],
+        location=ip_info["location"],
+        country=ip_info["country"],
+        input_features_json=json.dumps(features),
         results_json=json.dumps(results_for_db)
     )
     db.add(db_record)
@@ -345,4 +364,4 @@ async def download_template():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
