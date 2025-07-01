@@ -17,6 +17,7 @@ use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent
 
 // --- Configuration ---
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+// const API_BASE_URL = 'http://123.56.200.177'
 
 // --- i18n Composable ---
 const useI18n = () => {
@@ -75,7 +76,7 @@ const useI18n = () => {
       stats: 'Website Usage Statistics',
       totalVisits: 'Total Visits',
       totalPredictions: 'Total Predictions',
-      countriesReached: 'Countries Reached',
+      uniqueCountries: 'Countries Reached',
       usageRanking: 'Usage Ranking (by Country)',
       visitRanking: 'Visit Ranking (by Country)',
       noData: 'No Data Available',
@@ -140,20 +141,17 @@ const useApi = () => {
   return { logVisit, fetchStats, downloadTemplate, submitPrediction }
 }
 
-// --- Chart Composable (REVISED AND FIXED) ---
+// --- Chart Composable ---
 const useCharts = () => {
   const getChartOption = (probability) => {
-    // Ensure probability is a valid number (0-100), defaulting to 0 if not.
     const probPercent = (typeof probability === 'number' && !isNaN(probability)) ? probability : 0;
-
     let color;
-    // Define risk levels and corresponding colors based on percentage (0-100)
     if (probPercent >= 50) {
-      color = '#f56c6c'; // Danger (Red)
+      color = '#f56c6c';
     } else if (probPercent >= 20) {
-      color = '#e6a23c'; // Warning (Orange)
+      color = '#e6a23c';
     } else {
-      color = '#67c23a'; // Success (Green)
+      color = '#67c23a';
     }
 
     return {
@@ -166,20 +164,13 @@ const useCharts = () => {
         label: {
           show: true,
           position: 'center',
-          // DEFINITIVE FIX: Use a formatter function.
-          // This completely decouples the displayed text from the data values.
-          // The text will ALWAYS be the correct `probPercent`, while the data
-          // values below are only used for visual representation of the ring.
           formatter: () => `${probPercent.toFixed(1)}%`,
           fontSize: 18,
           fontWeight: 'bold',
           color: color,
         },
-        // Data for visual representation ONLY.
         data: [
-          // This part determines the size of the colored slice.
           { value: probPercent, name: 'Probability', itemStyle: { color: color } },
-          // This part determines the size of the grey "remaining" slice.
           { value: 100 - probPercent, name: 'Remaining', itemStyle: { color: '#f0f2f5' } }
         ]
       }]
@@ -298,7 +289,6 @@ const exportResultsToExcel = () => {
         'Disease Abbreviation': pred.disease_abbr,
         '疾病名称 (CN)': pred.disease_name_cn,
         'Disease Name (EN)': pred.disease_name_en,
-        // The value is already a percentage. Just format it to 2 decimal places.
         'Probability (%)': pred.probability.toFixed(2)
       }))
     )
@@ -374,7 +364,6 @@ onMounted(async () => {
                   <div class="el-upload__text">{{ t.uploadDrag }}<em>{{ t.uploadClick }}</em></div>
               </el-upload>
 
-              <!-- Fixed height area for file info, prevents layout shift -->
               <div class="file-info-area">
                 <div v-if="uploadFile" class="file-selected-box">
                     <span class="file-label">{{ t.fileSelected }}</span>
@@ -582,7 +571,7 @@ body {
 /* --- Main Grid --- */
 .main-grid {
   display: grid;
-  grid-template-columns: 420px 1fr;
+  grid-template-columns: 380px 1fr;
   gap: var(--spacing-xl);
   align-items: stretch; /* Make cards same height */
   margin-bottom: var(--spacing-xl);
@@ -653,7 +642,7 @@ body {
 .button-group { display: flex; gap: var(--spacing-md); margin-top: auto; padding-top: var(--spacing-lg); }
 .button-group .el-button { flex-grow: 1; }
 
-/* --- Results Panel (Right) - OPTIMIZED --- */
+/* --- Results Panel (Right) --- */
 .results-panel-card .el-card__body {
   flex-grow: 1;
   display: flex;
@@ -679,7 +668,7 @@ body {
 
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr); /* Enforce a 7-column layout with equal width */
+  grid-template-columns: repeat(7, 1fr);
   gap: 12px;
 }
 
@@ -692,8 +681,8 @@ body {
   display: flex;
   flex-direction: column;
   transition: all 0.2s ease;
-  min-width: 0; /* KEY FIX: Allows grid item to shrink and content to truncate */
-  overflow: hidden; /* Ensures no content spills out */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chart-container:hover {
@@ -702,17 +691,40 @@ body {
   border-color: var(--color-primary);
 }
 
+/* ▼▼▼ OPTIMIZED DISEASE TITLE - NO OVERFLOW, NO ELLIPSIS ▼▼▼ */
 .disease-title {
+  /* Layout properties */
   flex-shrink: 0;
-  font-size: 0.9rem;
+
+  /* Font and text properties */
+  font-size: 0.75rem;          /* Slightly smaller font for better fit */
   font-weight: 500;
+  line-height: 1.1;            /* Reduced line height for tighter spacing */
+
+  /* Fixed height calculation: (font-size * line-height * 2) + padding */
+  /* 0.75rem * 1.3 * 2 = 1.95rem ≈ 31px + 16px padding = 47px */
+  height: 47px;
+
+  /* Text alignment and spacing */
   text-align: center;
   padding: var(--spacing-sm);
   color: var(--color-text-primary);
-  white-space: nowrap;
+
+  /* Advanced word breaking for better wrapping */
+  word-break: break-word;      /* Break words when necessary */
+  overflow-wrap: break-word;   /* More aggressive word breaking */
+  hyphens: auto;               /* Enable automatic hyphenation */
+
+  /* Line clamping without ellipsis */
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;       /* Strictly limit to 2 lines */
+  -webkit-box-orient: vertical;
+
+  /* Remove text-overflow: ellipsis - this eliminates the ... */
+  /* The text will be cleanly cut at word boundaries instead */
 }
+/* ▲▲▲ END OF OPTIMIZED DISEASE TITLE ▲▲▲ */
 
 .chart {
   flex-grow: 1;
