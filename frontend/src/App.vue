@@ -718,7 +718,7 @@ body {
   /* Line clamping without ellipsis */
   overflow: hidden;
   display: -webkit-box;
-  -webkit-line-clamp: 3;       /* Strictly limit to 2 lines */
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 
   /* Remove text-overflow: ellipsis - this eliminates the ... */
