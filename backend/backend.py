@@ -2,6 +2,7 @@ import io
 import json
 import math
 import os
+import tempfile
 import time
 import zipfile
 from datetime import datetime
@@ -34,15 +35,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-# --- NEW Database Models ---
+# --- Database Models ---
 class VisitRecord(Base):
     """Logs every time a user visits the webpage."""
     __tablename__ = "visit_records"
     id = Column(Integer, primary_key=True, index=True)
     ip_address = Column(String, index=True)
-    # Location for ranking: "China Guangdong" or "United States"
+    # Location for ranking: "China Guangdong", "United States", "本地网络", etc.
     location_for_stats = Column(String, index=True)
-    country = Column(String)  # Country name, e.g., "China"
+    country = Column(String)  # Country name, e.g., "China", "本地"
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class PredictionUsageRecord(Base):
@@ -93,7 +94,7 @@ class LocationStat(BaseModel):
 class StatsResponse(BaseModel):
     total_visits: int
     total_predictions: int
-    unique_countries_count: int
+    unique_locations_count: int
     visit_ranking: List[LocationStat]
     usage_ranking: List[LocationStat]
 
@@ -121,7 +122,7 @@ DISEASE_FORMULAS = {
 app = FastAPI(
     title=PROJECT_TITLE,
     description="A modern API for assessing pregnancy-related disease risks based on first pregnancy data.",
-    version="3.1.0"
+    version="3.2.0"
 )
 
 app.add_middleware(
@@ -150,6 +151,7 @@ def get_ip_from_request(request: Request) -> str:
 
 def get_geo_info(ip: str) -> Dict[str, str]:
     """Fetches geographic location for a given IP using ipapi.co."""
+    # Handle localhost and private network IPs
     if not ip or ip in ("127.0.0.1", "localhost", "::1") or ip.startswith(("192.168.", "10.", "172.")):
         return {"ip": ip or "local", "location_for_stats": "本地网络", "country": "本地"}
 
@@ -168,7 +170,7 @@ def get_geo_info(ip: str) -> Dict[str, str]:
         region = data.get("region")
 
         location_for_stats = country_name
-        # For China, be more specific for stats ranking
+        # For China, be more specific for stats ranking.
         if country_code == "CN" and region:
             location_for_stats = f"中国 {region}"
 
@@ -189,7 +191,7 @@ def extract_archive(file_bytes: bytes, file_ext: str) -> List[tuple]:
         temp_path = temp_file.name
 
     try:
-        # libarchive is more versatile (rar, 7z)
+        # libarchive is more versatile (rar, 7z, zip)
         with libarchive.file_reader(temp_path) as archive:
             for entry in archive:
                 if (entry.name.lower().endswith('.xlsx') and
@@ -199,6 +201,7 @@ def extract_archive(file_bytes: bytes, file_ext: str) -> List[tuple]:
                     patient_id = os.path.splitext(filename)[0]
                     extracted_files.append((patient_id, file_content))
     except Exception as e:
+        # Fallback for zip files if libarchive fails for some reason
         print(f"libarchive extraction failed: {e}. Falling back to zipfile for .zip.")
         if file_ext == 'zip':
             try:
@@ -264,20 +267,22 @@ def calculate_probabilities(features: Dict[str, float]) -> List[Dict[str, Any]]:
         })
     return results
 
-def save_uploaded_file(file: UploadFile, ip_info: IpInfo, db: Session) -> Path:
+def save_uploaded_file(file: UploadFile, ip_info: IpInfo, db: Session):
     """Saves the file to disk with a timestamp and logs it to the database."""
     timestamp = int(time.time() * 1000)
-    original_filename = Path(file.filename)
     # Sanitize filename to prevent directory traversal
     safe_basename = Path(os.path.basename(file.filename))
 
     saved_filename_str = f"{safe_basename.stem}_{timestamp}{safe_basename.suffix}"
     saved_path = UPLOAD_DIRECTORY / saved_filename_str
 
-    with open(saved_path, "wb") as buffer:
-        buffer.write(file.file.read())
+    # Read file content once
+    file_content = file.file.read()
 
-    # Reset file pointer in case it's needed again
+    with open(saved_path, "wb") as buffer:
+        buffer.write(file_content)
+
+    # Reset file pointer in case it's needed again (e.g., for prediction logic)
     file.file.seek(0)
 
     # Log to UserDataRecord
@@ -287,7 +292,7 @@ def save_uploaded_file(file: UploadFile, ip_info: IpInfo, db: Session) -> Path:
         saved_filename=saved_filename_str
     )
     db.add(db_record)
-    return saved_path
+
 
 # --- API Endpoints ---
 
@@ -311,8 +316,9 @@ async def log_visit(ip_info: IpInfo, db: Session = Depends(get_db)):
         db.add(visit)
         db.commit()
     except Exception as e:
-        print(f"Error logging visit: {e}")
         db.rollback()
+        # Don't raise an exception to the client for a simple logging failure
+        print(f"Error logging visit for IP {ip_info.ip}: {e}")
 
 
 @app.post("/api/predict-single", response_model=PatientPredictionResult)
@@ -331,7 +337,7 @@ async def predict_single(
 
     # --- Transactional Block ---
     try:
-        # 1. Save uploaded file and log it
+        # 1. Save uploaded file and log it in UserDataRecord
         save_uploaded_file(file, ip_info, db)
 
         # 2. Log prediction usage
@@ -352,10 +358,9 @@ async def predict_single(
         db.commit() # Commit all changes if successful
     except Exception as e:
         db.rollback()
-        # Re-raise as HTTPException to inform the client
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
     return PatientPredictionResult(patient_id=patient_id, predictions=predictions)
 
@@ -379,7 +384,7 @@ async def predict_batch(
 
     # --- Transactional Block ---
     try:
-        # 1. Save uploaded archive and log it
+        # 1. Save uploaded archive and log it in UserDataRecord
         save_uploaded_file(file, ip_info, db)
 
         # 2. Extract files from archive
@@ -388,6 +393,7 @@ async def predict_batch(
         num_patients = len(extracted_files)
 
         if num_patients == 0:
+            # The transaction will be rolled back, so no records are created
             raise HTTPException(status_code=400, detail="No processable .xlsx files found in archive.")
 
         # 3. Log prediction usage (one record for the whole batch)
@@ -406,8 +412,14 @@ async def predict_batch(
                 predictions = calculate_probabilities(features)
                 all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
             except Exception as e:
-                print(f"Skipping patient {patient_id} due to error: {e}")
+                # Log the error and continue with other files in the batch
+                print(f"Skipping patient '{patient_id}' due to error: {e}")
                 continue
+
+        # If after processing, no patients were successful, we should inform the user.
+        if not all_results:
+            raise HTTPException(status_code=400, detail="No patients could be processed successfully from the archive.")
+
 
         db.commit() # Commit all changes if successful
     except Exception as e:
@@ -416,20 +428,32 @@ async def predict_batch(
             raise e
         raise HTTPException(status_code=500, detail=f"Batch processing failed: {e}")
 
-    if not all_results:
-        raise HTTPException(status_code=400, detail="No patients could be processed successfully from the archive.")
-
     return all_results
 
 
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_stats(db: Session = Depends(get_db)):
+    """
+    FIXED: This endpoint now correctly includes '本地网络' (Local Network) in statistics.
+    """
     total_visits = db.query(func.count(VisitRecord.id)).scalar() or 0
-    total_predictions = db.query(func.sum(PredictionUsageRecord.prediction_count)).scalar() or 0
 
-    invalid_locations = ["未知", "N/A", "本地", "本地网络", "Local Network", "Unknown", None]
+    # Use a subquery with coalesce to handle the case where there are no predictions yet.
+    # This ensures the sum returns 0 instead of None.
+    total_predictions_scalar = db.query(func.sum(PredictionUsageRecord.prediction_count)).scalar()
+    total_predictions = total_predictions_scalar if total_predictions_scalar is not None else 0
 
-    unique_countries_count = db.query(VisitRecord.country).filter(~VisitRecord.country.in_(invalid_locations)).distinct().count()
+    # Define locations that are truly invalid and should not be ranked.
+    # "本地网络" (Local Network) is now considered a valid location for stats.
+    invalid_locations = ["未知", "N/A", "Unknown", None]
+
+    # Calculate unique locations, including "本地网络" but excluding invalid ones.
+    unique_locations_count = (
+        db.query(VisitRecord.location_for_stats)
+        .filter(~VisitRecord.location_for_stats.in_(invalid_locations))
+        .distinct()
+        .count()
+    )
 
     visit_ranking_query = (
         db.query(VisitRecord.location_for_stats, func.count(VisitRecord.id).label("count"))
@@ -440,7 +464,10 @@ async def get_stats(db: Session = Depends(get_db)):
     )
 
     usage_ranking_query = (
-        db.query(PredictionUsageRecord.location_for_stats, func.sum(PredictionUsageRecord.prediction_count).label("count"))
+        db.query(
+            PredictionUsageRecord.location_for_stats,
+            func.sum(PredictionUsageRecord.prediction_count).label("count")
+        )
         .filter(~PredictionUsageRecord.location_for_stats.in_(invalid_locations))
         .group_by(PredictionUsageRecord.location_for_stats)
         .order_by(func.sum(PredictionUsageRecord.prediction_count).desc())
@@ -450,7 +477,7 @@ async def get_stats(db: Session = Depends(get_db)):
     return StatsResponse(
         total_visits=total_visits,
         total_predictions=total_predictions,
-        unique_countries_count=unique_countries_count,
+        unique_locations_count=unique_locations_count,
         visit_ranking=[LocationStat(location=loc, count=c) for loc, c in visit_ranking_query],
         usage_ranking=[LocationStat(location=loc, count=c) for loc, c in usage_ranking_query],
     )
@@ -476,4 +503,5 @@ async def download_template():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # To run this app: `uvicorn backend:app --reload`
+    uvicorn.run("backend:app", host="127.0.0.1", port=8000, reload=True)

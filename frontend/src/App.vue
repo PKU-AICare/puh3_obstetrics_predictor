@@ -30,7 +30,7 @@ const selectedPatientId = ref(null);
 const stats = ref({
   total_visits: 0,
   total_predictions: 0,
-  unique_countries_count: 0,
+  unique_locations_count: 0,
   visit_ranking: [],
   usage_ranking: []
 });
@@ -54,7 +54,7 @@ const messages = {
     stats: '网站使用统计',
     totalVisits: '总访问次数',
     totalPredictions: '总预测人次',
-    uniqueCountries: '覆盖国家/地区数',
+    uniqueLocations: '覆盖国家/地区数',
     usageRanking: '使用次数排行 (按地区)',
     visitRanking: '访问次数排行 (按地区)',
     noData: '暂无数据',
@@ -93,7 +93,7 @@ const messages = {
     stats: 'Website Usage Statistics',
     totalVisits: 'Total Visits',
     totalPredictions: 'Total Predictions',
-    uniqueCountries: 'Countries/Regions Reached',
+    uniqueLocations: 'Countries/Regions Reached',
     usageRanking: 'Usage Ranking (by Region)',
     visitRanking: 'Visit Ranking (by Region)',
     noData: 'No Data Available',
@@ -177,7 +177,9 @@ const handleFileChange = (file) => {
 
 const removeSelectedFile = () => {
   uploadFile.value = null;
-  uploadRef.value.clearFiles();
+  if (uploadRef.value) {
+    uploadRef.value.clearFiles();
+  }
 };
 
 const handleDownloadTemplate = async () => {
@@ -205,10 +207,12 @@ const handlePrediction = async () => {
     return;
   }
   if (!ipInfo.value) {
-    ElMessage.error(t.value.ipError);
-    // Attempt to re-fetch IP info if it's missing
-    await initializeUserSession();
-    if (!ipInfo.value) return; // Still failed, abort
+    // Attempt to re-fetch IP info if it's missing, then abort if it still fails
+    await initializeUserSession(false); // don't log visit again, just fetch
+    if (!ipInfo.value) {
+       ElMessage.error(t.value.ipError);
+       return;
+    }
   }
 
   const loadingText = locale.value === 'zh' ? '正在进行风险评估...' : 'Performing risk assessment...';
@@ -286,15 +290,17 @@ const fetchStats = async () => {
 };
 
 // --- IP Caching and Visit Logging ---
-const initializeUserSession = async () => {
+const initializeUserSession = async (logVisit = true) => {
   try {
     const cachedData = localStorage.getItem(IP_CACHE_KEY);
     if (cachedData) {
       const parsedData = JSON.parse(cachedData);
       if (Date.now() - parsedData.timestamp < IP_CACHE_DURATION) {
         ipInfo.value = parsedData.data;
-        // Log visit with cached data
-        await axios.post(`${API_BASE_URL}/api/log-visit`, ipInfo.value);
+        // Log visit with cached data if requested
+        if (logVisit) {
+            await axios.post(`${API_BASE_URL}/api/log-visit`, ipInfo.value);
+        }
         return; // Exit if cache is fresh
       }
     }
@@ -309,12 +315,16 @@ const initializeUserSession = async () => {
       timestamp: Date.now()
     }));
 
-    // Log visit with the newly fetched data
-    await axios.post(`${API_BASE_URL}/api/log-visit`, ipInfo.value);
+    // Log visit with the newly fetched data if requested
+    if (logVisit) {
+      await axios.post(`${API_BASE_URL}/api/log-visit`, ipInfo.value);
+    }
 
   } catch (error) {
     console.error("Failed to initialize user session or log visit:", error);
-    ElMessage.warning(t.value.ipError);
+    if (logVisit) { // Only show error on initial page load failure
+      ElMessage.warning(t.value.ipError);
+    }
   }
 };
 
@@ -440,8 +450,8 @@ onMounted(async () => {
             <div class="stat-label">{{ t.totalPredictions }}</div>
           </div>
           <div class="stat-item">
-            <div class="stat-value">{{ stats.unique_countries_count }}</div>
-            <div class="stat-label">{{ t.uniqueCountries }}</div>
+            <div class="stat-value">{{ stats.unique_locations_count.toLocaleString() }}</div>
+            <div class="stat-label">{{ t.uniqueLocations }}</div>
           </div>
         </div>
         <div class="stats-rankings">
@@ -453,7 +463,7 @@ onMounted(async () => {
                 <li v-for="(stat, index) in stats.visit_ranking" :key="stat.location">
                   <span class="rank-badge" :class="`rank-${index + 1}`">{{ index + 1 }}</span>
                   <span class="location">{{ stat.location }}</span>
-                  <span class="count">{{ stat.count }}</span>
+                  <span class="count">{{ stat.count.toLocaleString() }}</span>
                 </li>
               </ul>
               <el-empty v-else :description="t.noData" :image-size="50" />
@@ -466,7 +476,7 @@ onMounted(async () => {
                 <li v-for="(stat, index) in stats.usage_ranking" :key="stat.location">
                   <span class="rank-badge" :class="`rank-${index + 1}`">{{ index + 1 }}</span>
                   <span class="location">{{ stat.location }}</span>
-                  <span class="count">{{ stat.count }}</span>
+                  <span class="count">{{ stat.count.toLocaleString() }}</span>
                 </li>
               </ul>
               <el-empty v-else :description="t.noData" :image-size="50" />
@@ -680,12 +690,14 @@ body {
   flex-grow: 1;
   padding: var(--spacing-md);
   overflow-y: auto;
+  overflow-x: auto; /* Allow horizontal scroll for fixed grid */
 }
 
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, 1fr); /* Fixed 7 columns */
   gap: 12px;
+  min-width: 950px; /* Force horizontal scroll on smaller screens */
 }
 
 .chart-container {
@@ -709,12 +721,12 @@ body {
 
 .disease-title {
   flex-shrink: 0;
-  font-size: 0.75rem;
+  font-size: 0.7rem; /* Smaller font */
   font-weight: 500;
-  line-height: 1.3;
-  height: 47px;
+  line-height: 1.4; /* Adjusted for readability */
+  height: 55px; /* Calculated for 3 lines + padding */
   text-align: center;
-  padding: var(--spacing-sm);
+  padding: 4px 8px; /* Adjusted padding */
   color: var(--color-text-primary);
   word-break: break-word;
   overflow-wrap: break-word;
@@ -781,8 +793,6 @@ body {
   .title-area { text-align: center; }
   .stats-overview, .stats-rankings { grid-template-columns: 1fr; }
   .stats-rankings { gap: var(--spacing-lg); }
-  /* Make charts grid responsive on smaller screens */
-  .charts-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
   .chart-container { height: 160px; }
 }
 </style>
