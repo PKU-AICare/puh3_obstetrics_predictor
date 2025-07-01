@@ -41,9 +41,9 @@ class VisitRecord(Base):
     __tablename__ = "visit_records"
     id = Column(Integer, primary_key=True, index=True)
     ip_address = Column(String, index=True)
-    # Location for ranking: "China Guangdong", "United States", "本地网络", etc.
+    # Location for ranking: "中国 上海", "United States", "本地网络", "未知", etc.
     location_for_stats = Column(String, index=True)
-    country = Column(String)  # Country name, e.g., "China", "本地"
+    country = Column(String)  # Country name, e.g., "China", "本地", "未知"
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class PredictionUsageRecord(Base):
@@ -150,34 +150,49 @@ def get_ip_from_request(request: Request) -> str:
     return request.client.host
 
 def get_geo_info(ip: str) -> Dict[str, str]:
-    """Fetches geographic location for a given IP using ipapi.co."""
-    # Handle localhost and private network IPs
+    """
+    Fetches geographic location for a given IP.
+    Handles localhost and unknown cases as per requirements.
+    """
+    # Handle localhost and private network IPs, which are valid for stats.
+    # The ::1 is the IPv6 equivalent of 127.0.0.1.
     if not ip or ip in ("127.0.0.1", "localhost", "::1") or ip.startswith(("192.168.", "10.", "172.")):
         return {"ip": ip or "local", "location_for_stats": "本地网络", "country": "本地"}
 
-    api_url = f"https://ipapi.co/{ip}/json/"
+    api_url = f"https://api.ip2location.io/?ip={ip}"
     try:
+        # Set a reasonable timeout for the external API call
         response = requests.get(api_url, timeout=5)
-        response.raise_for_status()
+        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
         data = response.json()
 
-        if data.get("error"):
-            print(f"IPAPI.co error for {ip}: {data.get('reason')}")
+        # The API might return a 200 OK with empty data for some IPs.
+        if not data.get("country_name") and not data.get("country_code"):
+            print(f"API returned no country data for {ip}")
             return {"ip": ip, "location_for_stats": "未知", "country": "未知"}
 
-        country_name = data.get("country_name", "未知")
+        country = data.get("country_name", "未知")
+        region = data.get("region_name")  # Can be None if not found
         country_code = data.get("country_code")
-        region = data.get("region")
 
-        location_for_stats = country_name
+        # Default location for stats is the country name
+        location_for_stats = country
+
         # For China, be more specific for stats ranking.
         if country_code == "CN" and region:
             location_for_stats = f"中国 {region}"
 
-        return {"ip": ip, "location_for_stats": location_for_stats, "country": country_name}
+        # If after all this, the country name is still unknown, unify the status.
+        if country == "未知":
+             location_for_stats = "未知"
+
+        return {"ip": ip, "location_for_stats": location_for_stats, "country": country}
 
     except requests.exceptions.RequestException as e:
-        print(f"Failed to get IP info from ipapi.co for {ip}: {e}")
+        print(f"Failed to get IP info for {ip}: {e}")
+        return {"ip": ip, "location_for_stats": "未知", "country": "未知"}
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse JSON response for {ip}: {e}")
         return {"ip": ip, "location_for_stats": "未知", "country": "未知"}
 
 
@@ -434,30 +449,28 @@ async def predict_batch(
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_stats(db: Session = Depends(get_db)):
     """
-    FIXED: This endpoint now correctly includes '本地网络' (Local Network) in statistics.
+    This endpoint correctly includes '本地网络' (Local Network) and '未知' (Unknown)
+    in all statistics and rankings as requested.
     """
     total_visits = db.query(func.count(VisitRecord.id)).scalar() or 0
 
-    # Use a subquery with coalesce to handle the case where there are no predictions yet.
-    # This ensures the sum returns 0 instead of None.
     total_predictions_scalar = db.query(func.sum(PredictionUsageRecord.prediction_count)).scalar()
     total_predictions = total_predictions_scalar if total_predictions_scalar is not None else 0
 
-    # Define locations that are truly invalid and should not be ranked.
-    # "本地网络" (Local Network) is now considered a valid location for stats.
-    invalid_locations = ["未知", "N/A", "Unknown", None]
-
-    # Calculate unique locations, including "本地网络" but excluding invalid ones.
+    # Count all distinct, non-null locations. This now includes "本地网络" and "未知"
+    # as they are valid categories for statistics.
     unique_locations_count = (
         db.query(VisitRecord.location_for_stats)
-        .filter(~VisitRecord.location_for_stats.in_(invalid_locations))
+        .filter(VisitRecord.location_for_stats.isnot(None))
         .distinct()
         .count()
     )
 
+    # Ranking queries no longer filter out any specific location names,
+    # allowing all recorded locations to appear in the rankings.
     visit_ranking_query = (
         db.query(VisitRecord.location_for_stats, func.count(VisitRecord.id).label("count"))
-        .filter(~VisitRecord.location_for_stats.in_(invalid_locations))
+        .filter(VisitRecord.location_for_stats.isnot(None))
         .group_by(VisitRecord.location_for_stats)
         .order_by(func.count(VisitRecord.id).desc())
         .limit(10).all()
@@ -468,7 +481,7 @@ async def get_stats(db: Session = Depends(get_db)):
             PredictionUsageRecord.location_for_stats,
             func.sum(PredictionUsageRecord.prediction_count).label("count")
         )
-        .filter(~PredictionUsageRecord.location_for_stats.in_(invalid_locations))
+        .filter(PredictionUsageRecord.location_for_stats.isnot(None))
         .group_by(PredictionUsageRecord.location_for_stats)
         .order_by(func.sum(PredictionUsageRecord.prediction_count).desc())
         .limit(10).all()
