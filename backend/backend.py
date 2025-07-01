@@ -2,55 +2,80 @@ import io
 import json
 import math
 import os
-import tempfile
+import time
 import zipfile
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List
 
 import libarchive
 import pandas as pd
 import requests
-from fastapi import (Depends, FastAPI, File, HTTPException, Request,
-                     UploadFile, status)
+from fastapi import (Body, Depends, FastAPI, File, Form, HTTPException,
+                     Request, UploadFile, status)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import (Column, DateTime, Float, ForeignKey, Integer, String,
-                        Text, create_engine, func)
+from sqlalchemy import (Column, DateTime, ForeignKey, Integer, String, Text,
+                        create_engine, func)
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 # --- Project Configuration ---
 PROJECT_TITLE = "Assessment of Pregnancy-Related Disease Risks"
 SQLALCHEMY_DATABASE_URL = "sqlite:///./predictions.db"
+UPLOAD_DIRECTORY = Path("uploads")
+
+# --- Create upload directory on startup ---
+UPLOAD_DIRECTORY.mkdir(exist_ok=True)
 
 # --- Database Setup ---
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- Database Models ---
-class PredictionRecord(Base):
-    __tablename__ = "prediction_records"
-    id = Column(Integer, primary_key=True, index=True)
-    patient_id = Column(String, index=True)
-    ip_address = Column(String)
-    location = Column(String)
-    country = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    input_features_json = Column(Text)
-    results_json = Column(Text)
 
+# --- NEW Database Models ---
 class VisitRecord(Base):
+    """Logs every time a user visits the webpage."""
     __tablename__ = "visit_records"
     id = Column(Integer, primary_key=True, index=True)
-    ip_address = Column(String, unique=False, index=True)
-    location = Column(String)
-    country = Column(String)
+    ip_address = Column(String, index=True)
+    # Location for ranking: "China Guangdong" or "United States"
+    location_for_stats = Column(String, index=True)
+    country = Column(String)  # Country name, e.g., "China"
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class PredictionUsageRecord(Base):
+    """Logs each prediction event."""
+    __tablename__ = "prediction_usage_records"
+    id = Column(Integer, primary_key=True, index=True)
+    ip_address = Column(String, index=True)
+    location_for_stats = Column(String, index=True)
+    country = Column(String)
+    # 1 for single xlsx, N for N files in an archive
+    prediction_count = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class UserDataRecord(Base):
+    """Records information about user-uploaded files."""
+    __tablename__ = "user_data_records"
+    id = Column(Integer, primary_key=True, index=True)
+    ip_address = Column(String, index=True)
+    original_filename = Column(String)
+    # Filename stored on the server, with timestamp
+    saved_filename = Column(String, unique=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 Base.metadata.create_all(bind=engine)
 
+
 # --- Pydantic Models ---
+class IpInfo(BaseModel):
+    ip: str
+    location_for_stats: str
+    country: str
+
 class PredictionItem(BaseModel):
     disease_abbr: str
     disease_name_cn: str
@@ -69,8 +94,9 @@ class StatsResponse(BaseModel):
     total_visits: int
     total_predictions: int
     unique_countries_count: int
-    usage_ranking_by_country: List[LocationStat]
-    visit_ranking_by_country: List[LocationStat]
+    visit_ranking: List[LocationStat]
+    usage_ranking: List[LocationStat]
+
 
 # --- Disease Formulas & Mappings (Unchanged) ---
 DISEASE_FORMULAS = {
@@ -90,11 +116,12 @@ DISEASE_FORMULAS = {
     "SGA": {"name_cn": "小于胎龄儿","name_en": "Small for Gestational Age","coeffs": {"pre_bmi_1st": -0.064826410,"gestational_age_1st": 0.354456399,"birth_weight_1st": -0.002978985,"PE_1styes": -1.244787130,"Ca_1st_f": 2.337452681,"PCT_1st_f": 3.658695711}}
 }
 
+
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title=PROJECT_TITLE,
     description="A modern API for assessing pregnancy-related disease risks based on first pregnancy data.",
-    version="3.0.1"
+    version="3.1.0"
 )
 
 app.add_middleware(
@@ -105,6 +132,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # --- Database Dependency & Helpers ---
 def get_db():
     db = SessionLocal()
@@ -113,19 +141,17 @@ def get_db():
     finally:
         db.close()
 
-def get_ip_info(request: Request) -> Dict[str, str]:
-    """Extracts client IP and fetches geographic location using ipapi.co."""
-    client_host = request.client.host
+def get_ip_from_request(request: Request) -> str:
+    """Extracts client IP from request headers."""
     forwarded_for = request.headers.get("x-forwarded-for")
-
     if forwarded_for:
-        ip = forwarded_for.split(",")[0].strip()
-    else:
-        ip = client_host
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host
 
-    # Use a dummy IP for local testing to avoid API errors
-    if ip in ("127.0.0.1", "localhost", "::1") or ip.startswith(("192.168.", "10.", "172.")):
-        return {"ip": ip or "local", "location": "本地网络", "country": "本地"}
+def get_geo_info(ip: str) -> Dict[str, str]:
+    """Fetches geographic location for a given IP using ipapi.co."""
+    if not ip or ip in ("127.0.0.1", "localhost", "::1") or ip.startswith(("192.168.", "10.", "172.")):
+        return {"ip": ip or "local", "location_for_stats": "本地网络", "country": "本地"}
 
     api_url = f"https://ipapi.co/{ip}/json/"
     try:
@@ -135,60 +161,66 @@ def get_ip_info(request: Request) -> Dict[str, str]:
 
         if data.get("error"):
             print(f"IPAPI.co error for {ip}: {data.get('reason')}")
-            return {"ip": ip, "location": "未知位置", "country": "Unknown"}
+            return {"ip": ip, "location_for_stats": "未知", "country": "未知"}
 
-        country_name = data.get("country_name", "Unknown")
+        country_name = data.get("country_name", "未知")
         country_code = data.get("country_code")
         region = data.get("region")
 
-        location = country_name
+        location_for_stats = country_name
+        # For China, be more specific for stats ranking
         if country_code == "CN" and region:
-            location = f"中国 {region}"
+            location_for_stats = f"中国 {region}"
 
-        return {"ip": ip, "location": location, "country": country_name}
+        return {"ip": ip, "location_for_stats": location_for_stats, "country": country_name}
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to get IP info from ipapi.co for {ip}: {e}")
-        return {"ip": ip, "location": "未知位置", "country": "Unknown"}
+        return {"ip": ip, "location_for_stats": "未知", "country": "未知"}
 
-# --- Core Logic Functions (Largely Unchanged) ---
+
+# --- Core Logic Functions ---
 def extract_archive(file_bytes: bytes, file_ext: str) -> List[tuple]:
+    """Extracts .xlsx files from a given archive's bytes."""
     extracted_files = []
+    # Using a temporary file is more robust for libarchive
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_ext}') as temp_file:
+        temp_file.write(file_bytes)
+        temp_path = temp_file.name
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_ext}') as temp_file:
-            temp_file.write(file_bytes)
-            temp_path = temp_file.name
-        try:
-            with libarchive.file_reader(temp_path) as archive:
-                for entry in archive:
-                    if (entry.name.lower().endswith('.xlsx') and
-                        not entry.name.startswith('__MACOSX') and
-                        not entry.name.startswith('.') and not entry.isdir):
-                        file_content = b''.join(entry.get_blocks())
-                        filename = os.path.basename(entry.name)
-                        patient_id = os.path.splitext(filename)[0]
-                        extracted_files.append((patient_id, file_content))
-        finally:
-            os.unlink(temp_path)
+        # libarchive is more versatile (rar, 7z)
+        with libarchive.file_reader(temp_path) as archive:
+            for entry in archive:
+                if (entry.name.lower().endswith('.xlsx') and
+                    not entry.name.startswith(('__MACOSX', '.')) and not entry.isdir):
+                    file_content = b''.join(entry.get_blocks())
+                    filename = os.path.basename(entry.name)
+                    patient_id = os.path.splitext(filename)[0]
+                    extracted_files.append((patient_id, file_content))
     except Exception as e:
         print(f"libarchive extraction failed: {e}. Falling back to zipfile for .zip.")
         if file_ext == 'zip':
             try:
                 with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
                     for filename in zf.namelist():
-                        if (filename.lower().endswith('.xlsx') and
-                            not filename.startswith('__MACOSX') and not filename.startswith('.')):
+                        if (filename.lower().endswith('.xlsx') and not filename.startswith(('__MACOSX', '.'))):
                             with zf.open(filename) as xlsx_file:
                                 content = xlsx_file.read()
                                 patient_id = os.path.splitext(os.path.basename(filename))[0]
                                 extracted_files.append((patient_id, content))
             except Exception as zip_error:
-                raise HTTPException(status_code=400, detail=f"Failed to extract archive: {zip_error}")
+                raise HTTPException(status_code=400, detail=f"Failed to extract zip archive: {zip_error}")
+    finally:
+        os.unlink(temp_path) # Clean up the temporary file
+
     if not extracted_files:
         raise HTTPException(status_code=400, detail="No .xlsx files found in the archive.")
     return extracted_files
 
+
 def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
+    """Parses a single Excel file's bytes into a feature dictionary."""
     try:
         xls = pd.ExcelFile(io.BytesIO(contents))
         required_sheets = ['数据上传表_基线特征', '数据上传表_实验室检查']
@@ -212,60 +244,69 @@ def parse_excel_to_features(contents: bytes) -> Dict[str, float]:
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Error parsing Excel file: {str(e)}")
 
-# --- MODIFIED FUNCTION ---
+
 def calculate_probabilities(features: Dict[str, float]) -> List[Dict[str, Any]]:
-    """
-    Calculates disease probabilities, converts them to percentages,
-    and rounds to two decimal places.
-    """
+    """Calculates disease probabilities and formats them as percentages."""
     results = []
     for abbr, data in DISEASE_FORMULAS.items():
         logit = sum(coeff * features.get(var, 0.0) for var, coeff in data["coeffs"].items())
         try:
-            # Calculate raw probability (0.0 to 1.0)
             raw_probability = 1 / (1 + math.exp(-logit))
         except OverflowError:
             raw_probability = 1.0 if logit > 0 else 0.0
 
-        # Convert to percentage and round to two decimal places as requested
         percentage_probability = round(raw_probability * 100, 2)
-
         results.append({
             "disease_abbr": abbr,
             "disease_name_cn": data["name_cn"],
             "disease_name_en": data["name_en"],
-            "probability": percentage_probability  # Return the formatted percentage
+            "probability": percentage_probability
         })
     return results
 
-def process_and_log_prediction(db: Session, ip_info: dict, patient_id: str, features: dict):
-    # This function now receives and logs the formatted percentage probabilities
-    predictions = calculate_probabilities(features)
+def save_uploaded_file(file: UploadFile, ip_info: IpInfo, db: Session) -> Path:
+    """Saves the file to disk with a timestamp and logs it to the database."""
+    timestamp = int(time.time() * 1000)
+    original_filename = Path(file.filename)
+    # Sanitize filename to prevent directory traversal
+    safe_basename = Path(os.path.basename(file.filename))
 
-    # The `results_for_db` dictionary will contain the percentage values (e.g., 95.03)
-    results_for_db = {p["disease_abbr"]: p["probability"] for p in predictions}
+    saved_filename_str = f"{safe_basename.stem}_{timestamp}{safe_basename.suffix}"
+    saved_path = UPLOAD_DIRECTORY / saved_filename_str
 
-    db_record = PredictionRecord(
-        patient_id=patient_id,
-        ip_address=ip_info["ip"],
-        location=ip_info["location"],
-        country=ip_info["country"],
-        input_features_json=json.dumps(features),
-        results_json=json.dumps(results_for_db)
+    with open(saved_path, "wb") as buffer:
+        buffer.write(file.file.read())
+
+    # Reset file pointer in case it's needed again
+    file.file.seek(0)
+
+    # Log to UserDataRecord
+    db_record = UserDataRecord(
+        ip_address=ip_info.ip,
+        original_filename=file.filename,
+        saved_filename=saved_filename_str
     )
     db.add(db_record)
-    return predictions
+    return saved_path
 
 # --- API Endpoints ---
+
+@app.get("/api/get-geo-info", response_model=IpInfo)
+async def get_user_geo_info(request: Request):
+    """
+    Called by the frontend to get user's IP and geo-location for caching.
+    """
+    client_ip = get_ip_from_request(request)
+    return get_geo_info(client_ip)
+
 @app.post("/api/log-visit", status_code=status.HTTP_204_NO_CONTENT)
-async def log_visit(request: Request, db: Session = Depends(get_db)):
-    """Logs a visit record. Called by the frontend on application mount."""
+async def log_visit(ip_info: IpInfo, db: Session = Depends(get_db)):
+    """Logs a visit record using data provided by the frontend."""
     try:
-        ip_info = get_ip_info(request)
         visit = VisitRecord(
-            ip_address=ip_info["ip"],
-            location=ip_info["location"],
-            country=ip_info["country"]
+            ip_address=ip_info.ip,
+            location_for_stats=ip_info.location_for_stats,
+            country=ip_info.country
         )
         db.add(visit)
         db.commit()
@@ -273,67 +314,136 @@ async def log_visit(request: Request, db: Session = Depends(get_db)):
         print(f"Error logging visit: {e}")
         db.rollback()
 
+
 @app.post("/api/predict-single", response_model=PatientPredictionResult)
-async def predict_single(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def predict_single(
+    db: Session = Depends(get_db),
+    ip_info_json: str = Form(...),
+    file: UploadFile = File(...)
+):
     if not file.filename.lower().endswith('.xlsx'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .xlsx file.")
-    ip_info = get_ip_info(request)
-    patient_id = os.path.splitext(file.filename)[0]
-    contents = await file.read()
-    features = parse_excel_to_features(contents)
-    predictions = process_and_log_prediction(db, ip_info, patient_id, features)
-    db.commit()
+
+    try:
+        ip_info = IpInfo.model_validate_json(ip_info_json)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid IP info format.")
+
+    # --- Transactional Block ---
+    try:
+        # 1. Save uploaded file and log it
+        save_uploaded_file(file, ip_info, db)
+
+        # 2. Log prediction usage
+        usage_record = PredictionUsageRecord(
+            ip_address=ip_info.ip,
+            location_for_stats=ip_info.location_for_stats,
+            country=ip_info.country,
+            prediction_count=1 # Single file
+        )
+        db.add(usage_record)
+
+        # 3. Process prediction
+        patient_id = os.path.splitext(file.filename)[0]
+        contents = await file.read()
+        features = parse_excel_to_features(contents)
+        predictions = calculate_probabilities(features)
+
+        db.commit() # Commit all changes if successful
+    except Exception as e:
+        db.rollback()
+        # Re-raise as HTTPException to inform the client
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+
     return PatientPredictionResult(patient_id=patient_id, predictions=predictions)
 
+
 @app.post("/api/predict-batch", response_model=List[PatientPredictionResult])
-async def predict_batch(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def predict_batch(
+    db: Session = Depends(get_db),
+    ip_info_json: str = Form(...),
+    file: UploadFile = File(...)
+):
     file_ext = file.filename.lower().split('.')[-1]
     if file_ext not in ['zip', 'rar', '7z']:
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .zip, .rar, or .7z archive.")
+        raise HTTPException(status_code=400, detail="Invalid archive type. Use .zip, .rar, or .7z.")
 
-    ip_info = get_ip_info(request)
-    all_results: List[PatientPredictionResult] = []
     try:
+        ip_info = IpInfo.model_validate_json(ip_info_json)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid IP info format.")
+
+    all_results: List[PatientPredictionResult] = []
+
+    # --- Transactional Block ---
+    try:
+        # 1. Save uploaded archive and log it
+        save_uploaded_file(file, ip_info, db)
+
+        # 2. Extract files from archive
         archive_bytes = await file.read()
         extracted_files = extract_archive(archive_bytes, file_ext)
+        num_patients = len(extracted_files)
+
+        if num_patients == 0:
+            raise HTTPException(status_code=400, detail="No processable .xlsx files found in archive.")
+
+        # 3. Log prediction usage (one record for the whole batch)
+        usage_record = PredictionUsageRecord(
+            ip_address=ip_info.ip,
+            location_for_stats=ip_info.location_for_stats,
+            country=ip_info.country,
+            prediction_count=num_patients
+        )
+        db.add(usage_record)
+
+        # 4. Process each file
         for patient_id, xlsx_content in extracted_files:
             try:
                 features = parse_excel_to_features(xlsx_content)
-                predictions = process_and_log_prediction(db, ip_info, patient_id, features)
+                predictions = calculate_probabilities(features)
                 all_results.append(PatientPredictionResult(patient_id=patient_id, predictions=predictions))
             except Exception as e:
                 print(f"Skipping patient {patient_id} due to error: {e}")
                 continue
-        db.commit()
+
+        db.commit() # Commit all changes if successful
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Batch processing failed: {e}")
+
     if not all_results:
-        raise HTTPException(status_code=400, detail="No patients could be processed successfully.")
+        raise HTTPException(status_code=400, detail="No patients could be processed successfully from the archive.")
+
     return all_results
+
 
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_stats(db: Session = Depends(get_db)):
     total_visits = db.query(func.count(VisitRecord.id)).scalar() or 0
-    total_predictions = db.query(func.count(func.distinct(PredictionRecord.patient_id))).scalar() or 0
+    total_predictions = db.query(func.sum(PredictionUsageRecord.prediction_count)).scalar() or 0
 
-    invalid_countries = ["Unknown", "N/A", "本地", "Local Network", "未知位置", None]
+    invalid_locations = ["未知", "N/A", "本地", "本地网络", "Local Network", "Unknown", None]
 
-    unique_countries_count = db.query(PredictionRecord.country).filter(~PredictionRecord.country.in_(invalid_countries)).distinct().count()
+    unique_countries_count = db.query(VisitRecord.country).filter(~VisitRecord.country.in_(invalid_locations)).distinct().count()
 
-    usage_ranking_query = (
-        db.query(PredictionRecord.country, func.count(PredictionRecord.id).label("count"))
-        .filter(~PredictionRecord.country.in_(invalid_countries))
-        .group_by(PredictionRecord.country)
-        .order_by(func.count(PredictionRecord.id).desc())
+    visit_ranking_query = (
+        db.query(VisitRecord.location_for_stats, func.count(VisitRecord.id).label("count"))
+        .filter(~VisitRecord.location_for_stats.in_(invalid_locations))
+        .group_by(VisitRecord.location_for_stats)
+        .order_by(func.count(VisitRecord.id).desc())
         .limit(10).all()
     )
 
-    visit_ranking_query = (
-        db.query(VisitRecord.country, func.count(VisitRecord.id).label("count"))
-        .filter(~VisitRecord.country.in_(invalid_countries))
-        .group_by(VisitRecord.country)
-        .order_by(func.count(VisitRecord.id).desc())
+    usage_ranking_query = (
+        db.query(PredictionUsageRecord.location_for_stats, func.sum(PredictionUsageRecord.prediction_count).label("count"))
+        .filter(~PredictionUsageRecord.location_for_stats.in_(invalid_locations))
+        .group_by(PredictionUsageRecord.location_for_stats)
+        .order_by(func.sum(PredictionUsageRecord.prediction_count).desc())
         .limit(10).all()
     )
 
@@ -341,9 +451,10 @@ async def get_stats(db: Session = Depends(get_db)):
         total_visits=total_visits,
         total_predictions=total_predictions,
         unique_countries_count=unique_countries_count,
-        usage_ranking_by_country=[LocationStat(location=loc, count=c) for loc, c in usage_ranking_query],
-        visit_ranking_by_country=[LocationStat(location=loc, count=c) for loc, c in visit_ranking_query],
+        visit_ranking=[LocationStat(location=loc, count=c) for loc, c in visit_ranking_query],
+        usage_ranking=[LocationStat(location=loc, count=c) for loc, c in usage_ranking_query],
     )
+
 
 @app.get("/api/download-template")
 async def download_template():
@@ -361,6 +472,7 @@ async def download_template():
                 writer.sheets[sheet_name].column_dimensions[col].hidden = True
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Prediction_Template_Bilingual.xlsx"})
+
 
 if __name__ == "__main__":
     import uvicorn

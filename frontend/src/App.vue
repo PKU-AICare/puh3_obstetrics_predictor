@@ -13,275 +13,249 @@ import { TitleComponent, TooltipComponent, LegendComponent } from 'echarts/compo
 import VChart from 'vue-echarts'
 
 // --- ECharts Setup ---
-use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent])
+use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent]);
 
 // --- Configuration ---
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
-// const API_BASE_URL = 'http://123.56.200.177'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+const IP_CACHE_KEY = 'ipGeoInfo';
+const IP_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
-// --- i18n Composable ---
-const useI18n = () => {
-  const locale = ref('zh')
-  const messages = {
-    zh: {
-      title: '再次妊娠孕期疾病发生风险评估',
-      subtitle: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
-      uploadTitle: '上传与预测',
-      uploadDesc: '支持单个患者(.xlsx)或包含多个患者文件的压缩包(.zip, .rar, .7z)。文件名将作为患者ID。',
-      downloadTemplate: '下载模板',
-      startCalc: '开始计算',
-      uploadDrag: '将文件拖到此处，或',
-      uploadClick: '点击上传',
-      predictionResults: '预测结果',
-      patientID: '患者ID',
-      noResults: '上传文件后，在此查看预测结果。',
-      stats: '网站使用统计',
-      totalVisits: '总访问次数',
-      totalPredictions: '总预测人次',
-      uniqueCountries: '覆盖国家数',
-      usageRanking: '使用次数排行 (按国家)',
-      visitRanking: '访问次数排行 (按国家)',
-      noData: '暂无数据',
-      downloadResults: '下载结果 (Excel)',
-      patientSelection: '选择患者',
-      langSwitch: 'EN',
-      footerLine1: '国家产科专业医疗质量控制中心 | 国家妇产疾病临床医学研究中心 | 北京大学第三医院妇产科',
-      footerLine2: 'National Centre for Healthcare Quality Management in Obstetrics | National Clinical Research Center for Obstetrics and Gynecology | Department of Obstetrics and Gynecology, Peking University Third Hospital',
-      uploadSuccess: '文件上传成功。',
-      predictionSuccess: '患者 {patientId} 的风险评估完成！',
-      batchSuccess: '批量预测完成！您现在可以从下拉菜单中选择患者查看结果。',
-      downloadingTemplate: '正在生成模板...',
-      templateError: '模板下载失败，请稍后重试。',
-      selectFile: '请先选择一个文件。',
-      invalidFileType: '不支持的文件类型。请上传 .xlsx, .zip, .rar, 或 .7z 文件。',
-      calcFailed: '计算失败: {detail}',
-      exportSuccess: '结果已导出为 Excel 文件。',
-      exportError: '导出失败: {detail}',
-      fileSelected: '已选择文件:',
-      removeFile: '移除文件',
-      filePlaceholder: '待上传的文件将显示在此处',
-    },
-    en: {
-      title: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
-      subtitle: '再次妊娠孕期疾病发生风险评估',
-      uploadTitle: 'Upload & Predict',
-      uploadDesc: 'Supports single patient (.xlsx) or an archive (.zip, .rar, .7z) with multiple patient files. Filename will be used as Patient ID.',
-      downloadTemplate: 'Download Template',
-      startCalc: 'Calculate',
-      uploadDrag: 'Drag file here, or ',
-      uploadClick: 'click to upload',
-      predictionResults: 'Prediction Results',
-      patientID: 'Patient ID',
-      noResults: 'Upload a file to see prediction results here.',
-      stats: 'Website Usage Statistics',
-      totalVisits: 'Total Visits',
-      totalPredictions: 'Total Predictions',
-      uniqueCountries: 'Countries Reached',
-      usageRanking: 'Usage Ranking (by Country)',
-      visitRanking: 'Visit Ranking (by Country)',
-      noData: 'No Data Available',
-      downloadResults: 'Download Results (Excel)',
-      patientSelection: 'Select Patient',
-      langSwitch: '中文',
-      footerLine1: '国家产科专业医疗质量控制中心 | 国家妇产疾病临床医学研究中心 | 北京大学第三医院妇产科',
-      footerLine2: 'National Centre for Healthcare Quality Management in Obstetrics | National Clinical Research Center for Obstetrics and Gynecology | Department of Obstetrics and Gynecology, Peking University Third Hospital',
-      uploadSuccess: 'File uploaded successfully.',
-      predictionSuccess: 'Risk assessment for patient {patientId} is complete!',
-      batchSuccess: 'Batch prediction complete! You can now select a patient from the dropdown to view results.',
-      downloadingTemplate: 'Generating template...',
-      templateError: 'Failed to download template. Please try again later.',
-      selectFile: 'Please select a file first.',
-      invalidFileType: 'Invalid file type. Please upload a .xlsx, .zip, .rar, or .7z file.',
-      calcFailed: 'Calculation failed: {detail}',
-      exportSuccess: 'Results have been exported to an Excel file.',
-      exportError: 'Export failed: {detail}',
-      fileSelected: 'Selected file:',
-      removeFile: 'Remove file',
-      filePlaceholder: 'The file to be uploaded will be displayed here',
-    }
-  }
-  const t = computed(() => messages[locale.value])
-  const toggleLang = () => { locale.value = locale.value === 'zh' ? 'en' : 'zh' }
-  return { locale, t, toggleLang }
-}
-
-// --- API Composable ---
-const useApi = () => {
-  const logVisit = async () => {
-    try {
-      await axios.post(`${API_BASE_URL}/api/log-visit`)
-    } catch (error) { console.warn('Could not log visit:', error) }
-  }
-  const fetchStats = async () => {
-    try {
-      const { data } = await axios.get(`${API_BASE_URL}/api/stats`)
-      return data
-    } catch (error) {
-      console.error('Failed to fetch stats:', error)
-      return { total_visits: 0, total_predictions: 0, unique_countries_count: 0, visit_ranking_by_country: [], usage_ranking_by_country: [] }
-    }
-  }
-  const downloadTemplate = async () => {
-    const response = await axios.get(`${API_BASE_URL}/api/download-template`, { responseType: 'blob' })
-    const url = window.URL.createObjectURL(new Blob([response.data]))
-    const link = document.createElement('a')
-    link.href = url
-    link.setAttribute('download', 'Prediction_Template_Bilingual.xlsx')
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.URL.revokeObjectURL(url)
-  }
-  const submitPrediction = async (file, endpoint) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    const { data } = await axios.post(`${API_BASE_URL}${endpoint}`, formData)
-    return Array.isArray(data) ? data : [data]
-  }
-  return { logVisit, fetchStats, downloadTemplate, submitPrediction }
-}
-
-// --- Chart Composable ---
-const useCharts = () => {
-  const getChartOption = (probability) => {
-    const probPercent = (typeof probability === 'number' && !isNaN(probability)) ? probability : 0;
-    let color;
-    if (probPercent >= 50) {
-      color = '#f56c6c';
-    } else if (probPercent >= 20) {
-      color = '#e6a23c';
-    } else {
-      color = '#67c23a';
-    }
-
-    return {
-      series: [{
-        type: 'pie',
-        radius: ['70%', '90%'],
-        center: ['50%', '50%'],
-        avoidLabelOverlap: false,
-        silent: true,
-        label: {
-          show: true,
-          position: 'center',
-          formatter: () => `${probPercent.toFixed(1)}%`,
-          fontSize: 18,
-          fontWeight: 'bold',
-          color: color,
-        },
-        data: [
-          { value: probPercent, name: 'Probability', itemStyle: { color: color } },
-          { value: 100 - probPercent, name: 'Remaining', itemStyle: { color: '#f0f2f5' } }
-        ]
-      }]
-    };
-  }
-  return { getChartOption };
-}
-
-
-// --- Main component setup ---
-const { locale, t, toggleLang } = useI18n()
-const { logVisit, fetchStats, downloadTemplate, submitPrediction } = useApi()
-const { getChartOption } = useCharts()
-
-// --- State ---
-const isLoading = ref(false)
-const uploadFile = ref(null)
-const uploadRef = ref(null)
-const allPatientResults = ref([])
-const selectedPatientId = ref(null)
+// --- Reactive State ---
+const locale = ref('zh');
+const isLoading = ref(false);
+const uploadFile = ref(null);
+const uploadRef = ref(null);
+const allPatientResults = ref([]);
+const selectedPatientId = ref(null);
 const stats = ref({
-  total_visits: 0, total_predictions: 0, unique_countries_count: 0,
-  visit_ranking_by_country: [], usage_ranking_by_country: []
-})
-const chartGridKey = ref(0) // To force re-render charts
+  total_visits: 0,
+  total_predictions: 0,
+  unique_countries_count: 0,
+  visit_ranking: [],
+  usage_ranking: []
+});
+const chartGridKey = ref(0); // To force re-render charts
+const ipInfo = ref(null); // To store user's geo location info
 
-// --- Computed ---
-const hasResults = computed(() => allPatientResults.value.length > 0)
+// --- i18n Translations ---
+const messages = {
+  zh: {
+    title: '再次妊娠孕期疾病发生风险评估',
+    subtitle: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
+    uploadTitle: '上传与预测',
+    uploadDesc: '支持单个患者(.xlsx)或包含多个患者文件的压缩包(.zip, .rar, .7z)。文件名将作为患者ID。',
+    downloadTemplate: '下载模板',
+    startCalc: '开始计算',
+    uploadDrag: '将文件拖到此处，或',
+    uploadClick: '点击上传',
+    predictionResults: '预测结果',
+    patientID: '患者ID',
+    noResults: '上传文件后，在此查看预测结果。',
+    stats: '网站使用统计',
+    totalVisits: '总访问次数',
+    totalPredictions: '总预测人次',
+    uniqueCountries: '覆盖国家/地区数',
+    usageRanking: '使用次数排行 (按地区)',
+    visitRanking: '访问次数排行 (按地区)',
+    noData: '暂无数据',
+    downloadResults: '下载结果 (Excel)',
+    patientSelection: '选择患者',
+    langSwitch: 'EN',
+    footerLine1: '国家产科专业医疗质量控制中心 | 国家妇产疾病临床医学研究中心 | 北京大学第三医院妇产科',
+    footerLine2: 'National Centre for Healthcare Quality Management in Obstetrics | National Clinical Research Center for Obstetrics and Gynecology | Department of Obstetrics and Gynecology, Peking University Third Hospital',
+    uploadSuccess: '文件上传成功。',
+    predictionSuccess: '患者 {patientId} 的风险评估完成！',
+    batchSuccess: '批量预测完成！您现在可以从下拉菜单中选择患者查看结果。',
+    downloadingTemplate: '正在生成模板...',
+    templateError: '模板下载失败，请稍后重试。',
+    selectFile: '请先选择一个文件。',
+    invalidFileType: '不支持的文件类型。请上传 .xlsx, .zip, .rar, 或 .7z 文件。',
+    calcFailed: '计算失败: {detail}',
+    exportSuccess: '结果已导出为 Excel 文件。',
+    exportError: '导出失败: {detail}',
+    fileSelected: '已选择文件:',
+    removeFile: '移除文件',
+    filePlaceholder: '待上传的文件将显示在此处',
+    ipError: '无法获取您的地理位置信息，部分统计功能可能无法正常工作。'
+  },
+  en: {
+    title: 'Assessment of Pregnancy-Related Disease Risks in Repeat Pregnancies',
+    subtitle: '再次妊娠孕期疾病发生风险评估',
+    uploadTitle: 'Upload & Predict',
+    uploadDesc: 'Supports single patient (.xlsx) or an archive (.zip, .rar, .7z) with multiple patient files. Filename will be used as Patient ID.',
+    downloadTemplate: 'Download Template',
+    startCalc: 'Calculate',
+    uploadDrag: 'Drag file here, or ',
+    uploadClick: 'click to upload',
+    predictionResults: 'Prediction Results',
+    patientID: 'Patient ID',
+    noResults: 'Upload a file to see prediction results here.',
+    stats: 'Website Usage Statistics',
+    totalVisits: 'Total Visits',
+    totalPredictions: 'Total Predictions',
+    uniqueCountries: 'Countries/Regions Reached',
+    usageRanking: 'Usage Ranking (by Region)',
+    visitRanking: 'Visit Ranking (by Region)',
+    noData: 'No Data Available',
+    downloadResults: 'Download Results (Excel)',
+    patientSelection: 'Select Patient',
+    langSwitch: '中文',
+    footerLine1: '国家产科专业医疗质量控制中心 | 国家妇产疾病临床医学研究中心 | 北京大学第三医院妇产科',
+    footerLine2: 'National Centre for Healthcare Quality Management in Obstetrics | National Clinical Research Center for Obstetrics and Gynecology | Department of Obstetrics and Gynecology, Peking University Third Hospital',
+    uploadSuccess: 'File uploaded successfully.',
+    predictionSuccess: 'Risk assessment for patient {patientId} is complete!',
+    batchSuccess: 'Batch prediction complete! You can now select a patient from the dropdown to view results.',
+    downloadingTemplate: 'Generating template...',
+    templateError: 'Failed to download template. Please try again later.',
+    selectFile: 'Please select a file first.',
+    invalidFileType: 'Invalid file type. Please upload a .xlsx, .zip, .rar, or .7z file.',
+    calcFailed: 'Calculation failed: {detail}',
+    exportSuccess: 'Results have been exported to an Excel file.',
+    exportError: 'Export failed: {detail}',
+    fileSelected: 'Selected file:',
+    removeFile: 'Remove file',
+    filePlaceholder: 'The file to be uploaded will be displayed here',
+    ipError: 'Could not get your location info. Some statistical features may not work correctly.'
+  }
+};
+const t = computed(() => messages[locale.value]);
+const toggleLang = () => { locale.value = locale.value === 'zh' ? 'en' : 'zh'; };
+
+// --- Computed Properties ---
+const hasResults = computed(() => allPatientResults.value.length > 0);
 const currentPatientData = computed(() => {
-  if (!selectedPatientId.value) return null
-  return allPatientResults.value.find(p => p.patient_id === selectedPatientId.value)
-})
+  if (!selectedPatientId.value) return null;
+  return allPatientResults.value.find(p => p.patient_id === selectedPatientId.value);
+});
 const patientOptions = computed(() =>
   allPatientResults.value.map(p => ({ value: p.patient_id, label: p.patient_id }))
-)
+);
 
 // --- Methods ---
+
+const getChartOption = (probability) => {
+  const probPercent = (typeof probability === 'number' && !isNaN(probability)) ? probability : 0;
+  let color;
+  if (probPercent >= 50) color = '#f56c6c';
+  else if (probPercent >= 20) color = '#e6a23c';
+  else color = '#67c23a';
+
+  return {
+    series: [{
+      type: 'pie',
+      radius: ['70%', '90%'],
+      center: ['50%', '50%'],
+      avoidLabelOverlap: false,
+      silent: true,
+      label: {
+        show: true,
+        position: 'center',
+        formatter: () => `${probPercent.toFixed(1)}%`,
+        fontSize: 18,
+        fontWeight: 'bold',
+        color: color,
+      },
+      data: [
+        { value: probPercent, name: 'Probability', itemStyle: { color: color } },
+        { value: 100 - probPercent, name: 'Remaining', itemStyle: { color: '#f0f2f5' } }
+      ]
+    }]
+  };
+};
+
 const handleFileChange = (file) => {
-  const rawFile = file.raw
-  const fileExt = rawFile.name.split('.').pop().toLowerCase()
+  const rawFile = file.raw;
+  const fileExt = rawFile.name.split('.').pop().toLowerCase();
   if (!['xlsx', 'zip', 'rar', '7z'].includes(fileExt)) {
-    ElMessage.error(t.value.invalidFileType)
-    uploadRef.value.clearFiles()
-    uploadFile.value = null
-    return
+    ElMessage.error(t.value.invalidFileType);
+    uploadRef.value.clearFiles();
+    uploadFile.value = null;
+    return;
   }
-  uploadFile.value = rawFile
-}
+  uploadFile.value = rawFile;
+};
 
 const removeSelectedFile = () => {
-  uploadFile.value = null
-  uploadRef.value.clearFiles()
-}
+  uploadFile.value = null;
+  uploadRef.value.clearFiles();
+};
 
 const handleDownloadTemplate = async () => {
-  const loading = ElLoading.service({ lock: true, text: t.value.downloadingTemplate, background: 'rgba(0, 0, 0, 0.8)' })
+  const loading = ElLoading.service({ lock: true, text: t.value.downloadingTemplate, background: 'rgba(0, 0, 0, 0.8)' });
   try {
-    await downloadTemplate()
+    const response = await axios.get(`${API_BASE_URL}/api/download-template`, { responseType: 'blob' });
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'Prediction_Template_Bilingual.xlsx');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   } catch (error) {
-    ElMessage.error(t.value.templateError)
+    ElMessage.error(t.value.templateError);
   } finally {
-    loading.close()
+    loading.close();
   }
-}
+};
 
 const handlePrediction = async () => {
   if (!uploadFile.value) {
-    ElMessage.warning(t.value.selectFile)
-    return
+    ElMessage.warning(t.value.selectFile);
+    return;
+  }
+  if (!ipInfo.value) {
+    ElMessage.error(t.value.ipError);
+    // Attempt to re-fetch IP info if it's missing
+    await initializeUserSession();
+    if (!ipInfo.value) return; // Still failed, abort
   }
 
-  const loadingText = locale.value === 'zh' ? '正在进行风险评估...' : 'Performing risk assessment...'
-  isLoading.value = true
+  const loadingText = locale.value === 'zh' ? '正在进行风险评估...' : 'Performing risk assessment...';
+  isLoading.value = true;
   const loadingInstance = ElLoading.service({
-    lock: true,
-    text: loadingText,
-    background: 'rgba(0, 0, 0, 0.8)'
-  })
+    lock: true, text: loadingText, background: 'rgba(0, 0, 0, 0.8)'
+  });
 
-  const fileExt = uploadFile.value.name.split('.').pop().toLowerCase()
-  const endpoint = fileExt === 'xlsx' ? '/api/predict-single' : '/api/predict-batch'
+  const fileExt = uploadFile.value.name.split('.').pop().toLowerCase();
+  const endpoint = fileExt === 'xlsx' ? '/api/predict-single' : '/api/predict-batch';
+  const formData = new FormData();
+  formData.append('file', uploadFile.value);
+  formData.append('ip_info_json', JSON.stringify(ipInfo.value));
 
   try {
-    const results = await submitPrediction(uploadFile.value, endpoint)
+    const { data: results } = await axios.post(`${API_BASE_URL}${endpoint}`, formData);
 
-    results.forEach(result => {
-      const existingIndex = allPatientResults.value.findIndex(p => p.patient_id === result.patient_id)
-      if (existingIndex > -1) allPatientResults.value.splice(existingIndex, 1)
-      allPatientResults.value.unshift(result)
-    })
+    const actualResults = Array.isArray(results) ? results : [results];
 
-    if (results.length > 0) {
-      selectedPatientId.value = results[0].patient_id
-      const message = fileExt === 'xlsx' ? t.value.predictionSuccess.replace('{patientId}', results[0].patient_id) : t.value.batchSuccess
-      ElMessage.success(message)
+    actualResults.forEach(result => {
+      const existingIndex = allPatientResults.value.findIndex(p => p.patient_id === result.patient_id);
+      if (existingIndex > -1) allPatientResults.value.splice(existingIndex, 1);
+      allPatientResults.value.unshift(result);
+    });
+
+    if (actualResults.length > 0) {
+      selectedPatientId.value = actualResults[0].patient_id;
+      const message = fileExt === 'xlsx' ? t.value.predictionSuccess.replace('{patientId}', actualResults[0].patient_id) : t.value.batchSuccess;
+      ElMessage.success(message);
     }
 
-    stats.value = await fetchStats()
+    // Refresh stats after successful prediction
+    fetchStats();
+
   } catch (error) {
-    const detail = error.response?.data?.detail || 'Unknown error.'
-    ElMessage.error(t.value.calcFailed.replace('{detail}', detail))
+    const detail = error.response?.data?.detail || 'Unknown error.';
+    ElMessage.error(t.value.calcFailed.replace('{detail}', detail));
   } finally {
-    isLoading.value = false
-    loadingInstance.close()
-    removeSelectedFile()
-    nextTick(() => chartGridKey.value++) // Force re-render of charts
+    isLoading.value = false;
+    loadingInstance.close();
+    removeSelectedFile();
+    nextTick(() => { chartGridKey.value++; });
   }
-}
+};
 
 const exportResultsToExcel = () => {
-  if (!hasResults.value) return
+  if (!hasResults.value) return;
   try {
     const dataToExport = allPatientResults.value.flatMap(patient =>
       patient.predictions.map(pred => ({
@@ -291,29 +265,70 @@ const exportResultsToExcel = () => {
         'Disease Name (EN)': pred.disease_name_en,
         'Probability (%)': pred.probability.toFixed(2)
       }))
-    )
-    const worksheet = XLSX.utils.json_to_sheet(dataToExport)
-    const workbook = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Prediction Results")
-    XLSX.writeFile(workbook, `Prediction_Results_${new Date().toISOString().slice(0, 10)}.xlsx`)
-    ElMessage.success(t.value.exportSuccess)
+    );
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Prediction Results");
+    XLSX.writeFile(workbook, `Prediction_Results_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    ElMessage.success(t.value.exportSuccess);
   } catch (e) {
-    ElMessage.error(t.value.exportError.replace('{detail}', e.message))
+    ElMessage.error(t.value.exportError.replace('{detail}', e.message));
   }
-}
+};
 
-// --- Watchers ---
+const fetchStats = async () => {
+    try {
+      const { data } = await axios.get(`${API_BASE_URL}/api/stats`);
+      stats.value = data;
+    } catch (error) {
+      console.error('Failed to fetch stats:', error);
+    }
+};
+
+// --- IP Caching and Visit Logging ---
+const initializeUserSession = async () => {
+  try {
+    const cachedData = localStorage.getItem(IP_CACHE_KEY);
+    if (cachedData) {
+      const parsedData = JSON.parse(cachedData);
+      if (Date.now() - parsedData.timestamp < IP_CACHE_DURATION) {
+        ipInfo.value = parsedData.data;
+        // Log visit with cached data
+        await axios.post(`${API_BASE_URL}/api/log-visit`, ipInfo.value);
+        return; // Exit if cache is fresh
+      }
+    }
+
+    // If no cache or cache is stale, fetch from backend
+    const { data: newIpInfo } = await axios.get(`${API_BASE_URL}/api/get-geo-info`);
+    ipInfo.value = newIpInfo;
+
+    // Save to localStorage with new timestamp
+    localStorage.setItem(IP_CACHE_KEY, JSON.stringify({
+      data: newIpInfo,
+      timestamp: Date.now()
+    }));
+
+    // Log visit with the newly fetched data
+    await axios.post(`${API_BASE_URL}/api/log-visit`, ipInfo.value);
+
+  } catch (error) {
+    console.error("Failed to initialize user session or log visit:", error);
+    ElMessage.warning(t.value.ipError);
+  }
+};
+
+// --- Watchers & Lifecycle ---
 watch(locale, (newLang) => {
-  document.documentElement.lang = newLang === 'zh' ? 'zh-CN' : 'en'
-  document.title = t.value.title
-})
+  document.documentElement.lang = newLang === 'zh' ? 'zh-CN' : 'en';
+  document.title = t.value.title;
+});
 
-// --- Lifecycle ---
 onMounted(async () => {
-  document.title = t.value.title
-  await logVisit()
-  stats.value = await fetchStats()
-})
+  document.title = t.value.title;
+  await initializeUserSession();
+  await fetchStats();
+});
 </script>
 
 <template>
@@ -378,7 +393,7 @@ onMounted(async () => {
 
             <div class="button-group">
               <el-button @click="handleDownloadTemplate" :icon="Download" size="large">{{ t.downloadTemplate }}</el-button>
-              <el-button type="primary" @click="handlePrediction" :disabled="!uploadFile" :icon="Position" size="large">{{ t.startCalc }}</el-button>
+              <el-button type="primary" @click="handlePrediction" :disabled="!uploadFile || isLoading" :icon="Position" size="large">{{ t.startCalc }}</el-button>
             </div>
           </div>
         </el-card>
@@ -430,11 +445,12 @@ onMounted(async () => {
           </div>
         </div>
         <div class="stats-rankings">
+          <!-- Swapped Order: Visit Ranking on Left, Usage Ranking on Right -->
           <div class="ranking-section">
-            <h3>{{ t.usageRanking }}</h3>
-            <el-scrollbar max-height="200px">
-              <ul v-if="stats.usage_ranking_by_country.length > 0">
-                <li v-for="(stat, index) in stats.usage_ranking_by_country" :key="stat.location">
+            <h3>{{ t.visitRanking }}</h3>
+             <el-scrollbar max-height="200px">
+              <ul v-if="stats.visit_ranking && stats.visit_ranking.length > 0">
+                <li v-for="(stat, index) in stats.visit_ranking" :key="stat.location">
                   <span class="rank-badge" :class="`rank-${index + 1}`">{{ index + 1 }}</span>
                   <span class="location">{{ stat.location }}</span>
                   <span class="count">{{ stat.count }}</span>
@@ -444,10 +460,10 @@ onMounted(async () => {
             </el-scrollbar>
           </div>
           <div class="ranking-section">
-            <h3>{{ t.visitRanking }}</h3>
-             <el-scrollbar max-height="200px">
-              <ul v-if="stats.visit_ranking_by_country.length > 0">
-                <li v-for="(stat, index) in stats.visit_ranking_by_country" :key="stat.location">
+            <h3>{{ t.usageRanking }}</h3>
+            <el-scrollbar max-height="200px">
+              <ul v-if="stats.usage_ranking && stats.usage_ranking.length > 0">
+                <li v-for="(stat, index) in stats.usage_ranking" :key="stat.location">
                   <span class="rank-badge" :class="`rank-${index + 1}`">{{ index + 1 }}</span>
                   <span class="location">{{ stat.location }}</span>
                   <span class="count">{{ stat.count }}</span>
@@ -691,40 +707,23 @@ body {
   border-color: var(--color-primary);
 }
 
-/* ▼▼▼ OPTIMIZED DISEASE TITLE - NO OVERFLOW, NO ELLIPSIS ▼▼▼ */
 .disease-title {
-  /* Layout properties */
   flex-shrink: 0;
-
-  /* Font and text properties */
-  font-size: 0.75rem;          /* Slightly smaller font for better fit */
+  font-size: 0.75rem;
   font-weight: 500;
-  line-height: 1.1;            /* Reduced line height for tighter spacing */
-
-  /* Fixed height calculation: (font-size * line-height * 2) + padding */
-  /* 0.75rem * 1.3 * 2 = 1.95rem ≈ 31px + 16px padding = 47px */
+  line-height: 1.3;
   height: 47px;
-
-  /* Text alignment and spacing */
   text-align: center;
   padding: var(--spacing-sm);
   color: var(--color-text-primary);
-
-  /* Advanced word breaking for better wrapping */
-  word-break: break-word;      /* Break words when necessary */
-  overflow-wrap: break-word;   /* More aggressive word breaking */
-  hyphens: auto;               /* Enable automatic hyphenation */
-
-  /* Line clamping without ellipsis */
+  word-break: break-word;
+  overflow-wrap: break-word;
+  hyphens: auto;
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
-
-  /* Remove text-overflow: ellipsis - this eliminates the ... */
-  /* The text will be cleanly cut at word boundaries instead */
 }
-/* ▲▲▲ END OF OPTIMIZED DISEASE TITLE ▲▲▲ */
 
 .chart {
   flex-grow: 1;
